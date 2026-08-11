@@ -32,6 +32,9 @@ REPORT_DIR = PROJECT_ROOT / "reports"
 CATEGORY_OUTPUT = REPORT_DIR / "category_sla_performance.csv"
 PRIORITY_OUTPUT = REPORT_DIR / "priority_sla_performance.csv"
 REASSIGNMENT_OUTPUT = REPORT_DIR / "reassignment_sla_performance.csv"
+REASSIGNMENT_RESOLUTION_OUTPUT = (
+    REPORT_DIR / "reassignment_resolution_performance.csv"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +138,7 @@ def load_incident_data() -> pd.DataFrame:
         "resolution_time_hours",
         "reassignment_count",
         "reassignment_bucket",
+        "resolved_at",
     ]
 
     missing_columns = [
@@ -494,6 +498,90 @@ def analyze_reassignment_sla(
 
 
 # ---------------------------------------------------------------------------
+# Reassignment vs resolution-time analysis
+# ---------------------------------------------------------------------------
+
+def analyze_reassignment_resolution(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Analyze observed resolution-time performance across reassignment
+    buckets.
+
+    Resolution-time statistics are calculated only for incidents with a
+    non-null resolution duration.
+
+    Resolution coverage is reported separately because missing resolution
+    timestamps are not distributed uniformly across reassignment buckets.
+    """
+
+    reassignment_df = df.copy()
+
+    grouped = (
+        reassignment_df
+        .groupby(
+            "reassignment_bucket",
+            observed=True,
+        )
+        .agg(
+            incident_count=("number", "nunique"),
+            resolved_incidents=(
+                "resolved_at",
+                "count",
+            ),
+            missing_resolution=(
+                "resolved_at",
+                lambda x: x.isna().sum(),
+            ),
+            median_resolution_hours=(
+                "resolution_time_hours",
+                "median",
+            ),
+            p90_resolution_hours=(
+                "resolution_time_hours",
+                lambda x: x.quantile(0.90),
+            ),
+            mean_resolution_hours=(
+                "resolution_time_hours",
+                "mean",
+            ),
+        )
+        .reset_index()
+    )
+
+    grouped["resolution_coverage"] = (
+        grouped["resolved_incidents"]
+        / grouped["incident_count"]
+        * 100
+    )
+
+    bucket_order = [
+        "0",
+        "1-2",
+        "3-5",
+        "6+",
+    ]
+
+    grouped["bucket_order"] = (
+        grouped["reassignment_bucket"].map(
+            {
+                value: index
+                for index, value in enumerate(bucket_order)
+            }
+        )
+    )
+
+    grouped = (
+        grouped
+        .sort_values("bucket_order")
+        .drop(columns="bucket_order")
+        .reset_index(drop=True)
+    )
+
+    return grouped
+
+
+# ---------------------------------------------------------------------------
 # Category validation
 # ---------------------------------------------------------------------------
 
@@ -797,6 +885,120 @@ def validate_reassignment_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Reassignment resolution validation
+# ---------------------------------------------------------------------------
+
+def validate_reassignment_resolution_analysis(
+    result: pd.DataFrame,
+    source_df: pd.DataFrame,
+) -> None:
+    """
+    Validate reassignment-level resolution-time aggregation.
+    """
+
+    source_incidents = (
+        source_df["reassignment_bucket"]
+        .notna()
+        .sum()
+    )
+
+    result_incidents = (
+        result["incident_count"].sum()
+    )
+
+    if source_incidents != result_incidents:
+        raise AssertionError(
+            "Resolution analysis incident-count mismatch: "
+            f"source={source_incidents}, "
+            f"result={result_incidents}"
+        )
+
+    source_resolved = (
+        source_df.loc[
+            source_df["reassignment_bucket"].notna(),
+            "resolved_at",
+        ]
+        .notna()
+        .sum()
+    )
+
+    result_resolved = (
+        result["resolved_incidents"].sum()
+    )
+
+    if source_resolved != result_resolved:
+        raise AssertionError(
+            "Resolution analysis resolved-count mismatch: "
+            f"source={source_resolved}, "
+            f"result={result_resolved}"
+        )
+
+    source_missing = (
+        source_df.loc[
+            source_df["reassignment_bucket"].notna(),
+            "resolved_at",
+        ]
+        .isna()
+        .sum()
+    )
+
+    result_missing = (
+        result["missing_resolution"].sum()
+    )
+
+    if source_missing != result_missing:
+        raise AssertionError(
+            "Resolution analysis missing-count mismatch: "
+            f"source={source_missing}, "
+            f"result={result_missing}"
+        )
+
+    expected_coverage = (
+        result["resolved_incidents"]
+        / result["incident_count"]
+        * 100
+    )
+
+    if not np.isclose(
+        result["resolution_coverage"],
+        expected_coverage,
+    ).all():
+        raise AssertionError(
+            "Resolution coverage calculation is inconsistent."
+        )
+
+    if (
+        result["median_resolution_hours"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative median resolution time detected."
+        )
+
+    if (
+        result["p90_resolution_hours"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative P90 resolution time detected."
+        )
+
+    if (
+        result["mean_resolution_hours"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative mean resolution time detected."
+        )
+
+    if (
+        result["resolution_coverage"] < 0
+    ).any() or (
+        result["resolution_coverage"] > 100
+    ).any():
+        raise AssertionError(
+            "Invalid resolution coverage detected."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -850,6 +1052,24 @@ def save_reassignment_report(
 
     result.to_csv(
         REASSIGNMENT_OUTPUT,
+        index=False,
+    )
+
+
+def save_reassignment_resolution_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save reassignment-level resolution-time analysis to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        REASSIGNMENT_RESOLUTION_OUTPUT,
         index=False,
     )
 
@@ -1012,6 +1232,42 @@ def print_reassignment_summary(
     print(REASSIGNMENT_OUTPUT)
 
 
+def print_reassignment_resolution_summary(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Print reassignment-level resolution-time performance.
+    """
+
+    print("\n" + "=" * 70)
+    print("REASSIGNMENT VS RESOLUTION TIME")
+    print("=" * 70)
+
+    print(
+        "\nResolution-time performance by reassignment bucket:"
+    )
+
+    print(
+        result[
+            [
+                "reassignment_bucket",
+                "incident_count",
+                "resolved_incidents",
+                "missing_resolution",
+                "resolution_coverage",
+                "median_resolution_hours",
+                "p90_resolution_hours",
+                "mean_resolution_hours",
+            ]
+        ].to_string(
+            index=False
+        )
+    )
+
+    print("\nResolution report saved to:")
+    print(REASSIGNMENT_RESOLUTION_OUTPUT)
+
+
 # ---------------------------------------------------------------------------
 # Main execution
 # ---------------------------------------------------------------------------
@@ -1093,12 +1349,36 @@ def main() -> None:
     )
 
     # -----------------------------------------------------------------------
+    # Reassignment vs resolution-time analysis
+    # -----------------------------------------------------------------------
+
+    reassignment_resolution_result = (
+        analyze_reassignment_resolution(
+            df
+        )
+    )
+
+    validate_reassignment_resolution_analysis(
+        result=reassignment_resolution_result,
+        source_df=df,
+    )
+
+    save_reassignment_resolution_report(
+        reassignment_resolution_result
+    )
+
+    print_reassignment_resolution_summary(
+        reassignment_resolution_result
+    )
+
+    # -----------------------------------------------------------------------
     # Final validation status
     # -----------------------------------------------------------------------
 
     print("\nCategory validation: PASSED")
     print("Priority validation: PASSED")
     print("Reassignment validation: PASSED")
+    print("Reassignment resolution validation: PASSED")
 
 
 if __name__ == "__main__":
