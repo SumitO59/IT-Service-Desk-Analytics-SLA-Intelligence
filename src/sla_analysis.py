@@ -35,6 +35,9 @@ REASSIGNMENT_OUTPUT = REPORT_DIR / "reassignment_sla_performance.csv"
 REASSIGNMENT_RESOLUTION_OUTPUT = (
     REPORT_DIR / "reassignment_resolution_performance.csv"
 )
+ASSIGNMENT_GROUP_OUTPUT = (
+    REPORT_DIR / "assignment_group_performance.csv"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +45,7 @@ REASSIGNMENT_RESOLUTION_OUTPUT = (
 # ---------------------------------------------------------------------------
 
 MIN_CATEGORY_SAMPLE = 100
+MIN_ASSIGNMENT_GROUP_SAMPLE = 100
 CONFIDENCE_Z = 1.96
 
 
@@ -101,9 +105,9 @@ def wilson_interval(
     lower = center - margin
     upper = center + margin
 
-    # A binomial proportion cannot fall outside [0, 1].
-    # Clipping prevents floating-point errors from producing
-    # impossible bounds such as -2.77e-17.
+# A binomial proportion cannot fall outside [0, 1].
+# Clipping prevents floating-point errors from producing
+# impossible bounds such as -2.77e-17.
     lower = max(0.0, lower)
     upper = min(1.0, upper)
 
@@ -133,6 +137,7 @@ def load_incident_data() -> pd.DataFrame:
         "number",
         "category",
         "priority",
+        "assignment_group",
         "made_sla",
         "sla_breached",
         "resolution_time_hours",
@@ -582,6 +587,145 @@ def analyze_reassignment_resolution(
 
 
 # ---------------------------------------------------------------------------
+# Assignment-group performance analysis
+# ---------------------------------------------------------------------------
+
+def analyze_assignment_group_performance(
+    df: pd.DataFrame,
+    min_sample: int = MIN_ASSIGNMENT_GROUP_SAMPLE,
+) -> pd.DataFrame:
+    """
+    Calculate SLA and resolution performance by assignment group.
+
+    Assignment groups with fewer than `min_sample` incidents are retained
+    in the output but excluded from primary performance comparisons.
+
+    Incidents with missing assignment groups are excluded from group-level
+    rankings and reported separately.
+    """
+
+    assignment_df = df.copy()
+
+    assignment_df = assignment_df.dropna(
+        subset=["assignment_group"]
+    )
+
+    grouped = (
+        assignment_df
+        .groupby(
+            "assignment_group",
+            observed=True,
+        )
+        .agg(
+            incident_count=("number", "nunique"),
+            resolved_incidents=(
+                "resolved_at",
+                "count",
+            ),
+            missing_resolution=(
+                "resolved_at",
+                lambda x: x.isna().sum(),
+            ),
+            sla_breaches=(
+                "sla_breached",
+                "sum",
+            ),
+            median_resolution_hours=(
+                "resolution_time_hours",
+                "median",
+            ),
+            p90_resolution_hours=(
+                "resolution_time_hours",
+                lambda x: x.quantile(0.90),
+            ),
+            reassigned_incidents=(
+                "reassignment_count",
+                lambda x: (x > 0).sum(),
+            ),
+            mean_reassignment_count=(
+                "reassignment_count",
+                "mean",
+            ),
+        )
+        .reset_index()
+    )
+
+    grouped["sla_breaches"] = (
+        grouped["sla_breaches"].astype(int)
+    )
+
+    grouped["breach_rate"] = (
+        grouped["sla_breaches"]
+        / grouped["incident_count"]
+    )
+
+    grouped["sla_compliance"] = (
+        1 - grouped["breach_rate"]
+    )
+
+    grouped["resolution_coverage"] = (
+        grouped["resolved_incidents"]
+        / grouped["incident_count"]
+    )
+
+    grouped["reassignment_rate"] = (
+        grouped["reassigned_incidents"]
+        / grouped["incident_count"]
+    )
+
+    intervals = grouped.apply(
+        lambda row: wilson_interval(
+            successes=int(row["sla_breaches"]),
+            total=int(row["incident_count"]),
+        ),
+        axis=1,
+    )
+
+    grouped["breach_rate_ci_lower"] = intervals.apply(
+        lambda interval: interval[0]
+    )
+
+    grouped["breach_rate_ci_upper"] = intervals.apply(
+        lambda interval: interval[1]
+    )
+
+    grouped["eligible_for_comparison"] = (
+        grouped["incident_count"] >= min_sample
+    )
+
+    percentage_columns = [
+        "breach_rate",
+        "sla_compliance",
+        "resolution_coverage",
+        "reassignment_rate",
+        "breach_rate_ci_lower",
+        "breach_rate_ci_upper",
+    ]
+
+    for column in percentage_columns:
+        grouped[column] = grouped[column] * 100
+
+    grouped = (
+        grouped
+        .sort_values(
+            by=[
+                "eligible_for_comparison",
+                "breach_rate",
+                "incident_count",
+            ],
+            ascending=[
+                False,
+                False,
+                False,
+            ],
+        )
+        .reset_index(drop=True)
+    )
+
+    return grouped
+
+
+# ---------------------------------------------------------------------------
 # Category validation
 # ---------------------------------------------------------------------------
 
@@ -843,9 +987,6 @@ def validate_reassignment_analysis(
             "Invalid reassignment Wilson confidence intervals."
         )
 
-    # Verify that the existing bucket definitions agree with the
-    # underlying reassignment_count values.
-
     expected_bucket = pd.Series(
         np.select(
             [
@@ -999,6 +1140,213 @@ def validate_reassignment_resolution_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Assignment-group validation
+# ---------------------------------------------------------------------------
+
+def validate_assignment_group_analysis(
+    result: pd.DataFrame,
+    source_df: pd.DataFrame,
+) -> None:
+    """
+    Validate assignment-group performance aggregation.
+
+    Missing assignment groups are intentionally excluded from the grouped
+    result and validated separately.
+    """
+
+    valid_assignment_groups = (
+        source_df["assignment_group"]
+        .dropna()
+        .nunique()
+    )
+
+    result_assignment_groups = (
+        result["assignment_group"].nunique()
+    )
+
+    if valid_assignment_groups != result_assignment_groups:
+        raise AssertionError(
+            "Assignment-group count mismatch: "
+            f"source={valid_assignment_groups}, "
+            f"result={result_assignment_groups}"
+        )
+
+    valid_mask = (
+        source_df["assignment_group"].notna()
+    )
+
+    source_incidents = (
+        valid_mask.sum()
+    )
+
+    result_incidents = (
+        result["incident_count"].sum()
+    )
+
+    if source_incidents != result_incidents:
+        raise AssertionError(
+            "Assignment-group incident-count mismatch: "
+            f"source={source_incidents}, "
+            f"result={result_incidents}"
+        )
+
+    source_breaches = (
+        source_df.loc[
+            valid_mask,
+            "sla_breached",
+        ].sum()
+    )
+
+    result_breaches = (
+        result["sla_breaches"].sum()
+    )
+
+    if source_breaches != result_breaches:
+        raise AssertionError(
+            "Assignment-group SLA-breach mismatch: "
+            f"source={source_breaches}, "
+            f"result={result_breaches}"
+        )
+
+    source_resolved = (
+        source_df.loc[
+            valid_mask,
+            "resolved_at",
+        ]
+        .notna()
+        .sum()
+    )
+
+    result_resolved = (
+        result["resolved_incidents"].sum()
+    )
+
+    if source_resolved != result_resolved:
+        raise AssertionError(
+            "Assignment-group resolved-count mismatch: "
+            f"source={source_resolved}, "
+            f"result={result_resolved}"
+        )
+
+    source_missing_resolution = (
+        source_df.loc[
+            valid_mask,
+            "resolved_at",
+        ]
+        .isna()
+        .sum()
+    )
+
+    result_missing_resolution = (
+        result["missing_resolution"].sum()
+    )
+
+    if source_missing_resolution != result_missing_resolution:
+        raise AssertionError(
+            "Assignment-group missing-resolution mismatch: "
+            f"source={source_missing_resolution}, "
+            f"result={result_missing_resolution}"
+        )
+
+    missing_assignment_groups = (
+        source_df["assignment_group"].isna().sum()
+    )
+
+    expected_missing_assignment_groups = (
+        len(source_df) - source_incidents
+    )
+
+    if (
+        missing_assignment_groups
+        != expected_missing_assignment_groups
+    ):
+        raise AssertionError(
+            "Missing assignment-group count is inconsistent."
+        )
+
+    invalid_intervals = result[
+        (
+            result["breach_rate"]
+            < result["breach_rate_ci_lower"]
+        )
+        |
+        (
+            result["breach_rate"]
+            > result["breach_rate_ci_upper"]
+        )
+    ]
+
+    if not invalid_intervals.empty:
+        raise AssertionError(
+            "Some assignment-group breach rates fall "
+            "outside their confidence intervals."
+        )
+
+    if (
+        (result["breach_rate_ci_lower"] < 0).any()
+        or
+        (result["breach_rate_ci_upper"] > 100).any()
+    ):
+        raise AssertionError(
+            "Invalid assignment-group Wilson confidence intervals."
+        )
+
+    expected_eligibility = (
+        result["incident_count"]
+        >= MIN_ASSIGNMENT_GROUP_SAMPLE
+    )
+
+    if not (
+        result["eligible_for_comparison"]
+        == expected_eligibility
+    ).all():
+        raise AssertionError(
+            "Assignment-group sample-size eligibility flag "
+            "is inconsistent."
+        )
+
+    expected_coverage = (
+        result["resolved_incidents"]
+        / result["incident_count"]
+        * 100
+    )
+
+    if not np.isclose(
+        result["resolution_coverage"],
+        expected_coverage,
+    ).all():
+        raise AssertionError(
+            "Assignment-group resolution coverage "
+            "calculation is inconsistent."
+        )
+
+    if (
+        result["median_resolution_hours"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative assignment-group median resolution "
+            "time detected."
+        )
+
+    if (
+        result["p90_resolution_hours"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative assignment-group P90 resolution "
+            "time detected."
+        )
+
+    if (
+        result["resolution_coverage"] < 0
+    ).any() or (
+        result["resolution_coverage"] > 100
+    ).any():
+        raise AssertionError(
+            "Invalid assignment-group resolution coverage."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -1070,6 +1418,24 @@ def save_reassignment_resolution_report(
 
     result.to_csv(
         REASSIGNMENT_RESOLUTION_OUTPUT,
+        index=False,
+    )
+
+
+def save_assignment_group_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save assignment-group performance analysis to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        ASSIGNMENT_GROUP_OUTPUT,
         index=False,
     )
 
@@ -1268,6 +1634,129 @@ def print_reassignment_resolution_summary(
     print(REASSIGNMENT_RESOLUTION_OUTPUT)
 
 
+def print_assignment_group_summary(
+    result: pd.DataFrame,
+    source_df: pd.DataFrame,
+) -> None:
+    """
+    Print assignment-group SLA and resolution performance.
+
+    Breach rate and breach volume are intentionally reported separately.
+    """
+
+    eligible = result[
+        result["eligible_for_comparison"]
+    ].copy()
+
+    missing_assignment_groups = (
+        source_df["assignment_group"].isna().sum()
+    )
+
+    missing_assignment_group_rate = (
+        missing_assignment_groups
+        / len(source_df)
+        * 100
+    )
+
+    print("\n" + "=" * 70)
+    print("ASSIGNMENT-GROUP PERFORMANCE")
+    print("=" * 70)
+
+    print(
+        f"\nTotal assignment groups: {len(result)}"
+    )
+
+    print(
+        f"Groups eligible for comparison "
+        f"(n >= {MIN_ASSIGNMENT_GROUP_SAMPLE}): "
+        f"{len(eligible)}"
+    )
+
+    print("\nMissing assignment groups:")
+
+    print(
+        f"Count: {missing_assignment_groups:,}"
+    )
+
+    print(
+        f"Percentage: "
+        f"{missing_assignment_group_rate:.2f}%"
+    )
+
+    print(
+        "\nTop assignment groups by SLA breach rate:"
+    )
+
+    print(
+        eligible[
+            [
+                "assignment_group",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ]
+        .sort_values(
+            "breach_rate",
+            ascending=False,
+        )
+        .head(10)
+        .to_string(index=False)
+    )
+
+    print(
+        "\nAssignment groups with highest breach volume:"
+    )
+
+    print(
+        eligible
+        .sort_values(
+            "sla_breaches",
+            ascending=False,
+        )[
+            [
+                "assignment_group",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+            ]
+        ]
+        .head(10)
+        .to_string(index=False)
+    )
+
+    print(
+        "\nAssignment groups with highest median "
+        "resolution time:"
+    )
+
+    print(
+        eligible
+        .sort_values(
+            "median_resolution_hours",
+            ascending=False,
+        )[
+            [
+                "assignment_group",
+                "incident_count",
+                "median_resolution_hours",
+                "p90_resolution_hours",
+                "resolution_coverage",
+            ]
+        ]
+        .head(10)
+        .to_string(index=False)
+    )
+
+    print(
+        "\nAssignment-group performance report saved to:"
+    )
+
+    print(ASSIGNMENT_GROUP_OUTPUT)
+
+
 # ---------------------------------------------------------------------------
 # Main execution
 # ---------------------------------------------------------------------------
@@ -1372,6 +1861,30 @@ def main() -> None:
     )
 
     # -----------------------------------------------------------------------
+    # Assignment-group performance analysis
+    # -----------------------------------------------------------------------
+
+    assignment_group_result = (
+        analyze_assignment_group_performance(
+            df
+        )
+    )
+
+    validate_assignment_group_analysis(
+        result=assignment_group_result,
+        source_df=df,
+    )
+
+    save_assignment_group_report(
+        assignment_group_result
+    )
+
+    print_assignment_group_summary(
+        result=assignment_group_result,
+        source_df=df,
+    )
+
+    # -----------------------------------------------------------------------
     # Final validation status
     # -----------------------------------------------------------------------
 
@@ -1379,6 +1892,7 @@ def main() -> None:
     print("Priority validation: PASSED")
     print("Reassignment validation: PASSED")
     print("Reassignment resolution validation: PASSED")
+    print("Assignment-group validation: PASSED")
 
 
 if __name__ == "__main__":
