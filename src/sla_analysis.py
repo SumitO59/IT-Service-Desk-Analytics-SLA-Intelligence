@@ -55,6 +55,9 @@ INCIDENT_SLA_RISK_SCORES_OUTPUT = (
 SLA_RISK_PORTFOLIO_OUTPUT = (
     REPORT_DIR / "sla_risk_portfolio_summary.csv"
 )
+SLA_RISK_CONCENTRATION_OUTPUT = (
+    REPORT_DIR / "sla_risk_concentration_analysis.csv"
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1188,6 +1191,386 @@ def validate_sla_risk_portfolio_summary(
             "Negative mean risk-factor counts detected."
         )
 
+
+# ---------------------------------------------------------------------------
+# SLA risk concentration analysis
+# ---------------------------------------------------------------------------
+
+def build_sla_risk_concentration_analysis(
+    incident_risk_scores: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Analyze historical SLA-risk concentration across operational dimensions.
+
+    Elevated risk is defined as the combined High and Critical risk bands.
+
+    This is descriptive historical analysis and does not represent
+    predicted SLA-breach probabilities.
+    """
+
+    required_columns = [
+        "priority",
+        "reassignment_bucket",
+        "category",
+        "assignment_group",
+        "sla_risk_score",
+        "sla_risk_band",
+        "risk_factor_count",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in incident_risk_scores.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "Required incident SLA-risk columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    if incident_risk_scores.empty:
+        raise ValueError(
+            "Incident SLA-risk score table is empty."
+        )
+
+    dimension_definitions = [
+        (
+            "Category",
+            "category",
+            MIN_CATEGORY_SAMPLE,
+        ),
+        (
+            "Priority",
+            "priority",
+            0,
+        ),
+        (
+            "Reassignment Bucket",
+            "reassignment_bucket",
+            0,
+        ),
+        (
+            "Assignment Group",
+            "assignment_group",
+            MIN_ASSIGNMENT_GROUP_SAMPLE,
+        ),
+    ]
+
+    results = []
+
+    for dimension, column, minimum_sample in dimension_definitions:
+
+        dimension_df = incident_risk_scores.dropna(
+            subset=[column]
+        ).copy()
+
+        grouped = (
+            dimension_df
+            .groupby(
+                column,
+                observed=True,
+            )
+            .agg(
+                incident_count=(
+                    "sla_risk_score",
+                    "size",
+                ),
+                elevated_risk_incident_count=(
+                    "sla_risk_band",
+                    lambda x: x.isin(
+                        ["High", "Critical"]
+                    ).sum(),
+                ),
+                critical_risk_incident_count=(
+                    "sla_risk_band",
+                    lambda x: (x == "Critical").sum(),
+                ),
+                mean_sla_risk_score=(
+                    "sla_risk_score",
+                    "mean",
+                ),
+                median_sla_risk_score=(
+                    "sla_risk_score",
+                    "median",
+                ),
+                mean_risk_factor_count=(
+                    "risk_factor_count",
+                    "mean",
+                ),
+            )
+            .reset_index()
+            .rename(
+                columns={
+                    column: "dimension_value",
+                }
+            )
+        )
+
+        grouped["dimension"] = dimension
+
+        grouped["elevated_risk_share_pct"] = (
+            grouped["elevated_risk_incident_count"]
+            / grouped["incident_count"]
+            * 100.0
+        )
+
+        grouped["critical_risk_share_pct"] = (
+            grouped["critical_risk_incident_count"]
+            / grouped["incident_count"]
+            * 100.0
+        )
+
+        if minimum_sample > 0:
+            grouped["comparison_eligible"] = (
+                grouped["incident_count"]
+                >= minimum_sample
+            )
+        else:
+            grouped["comparison_eligible"] = True
+
+        results.append(
+            grouped[
+                [
+                    "dimension",
+                    "dimension_value",
+                    "incident_count",
+                    "elevated_risk_incident_count",
+                    "elevated_risk_share_pct",
+                    "critical_risk_incident_count",
+                    "critical_risk_share_pct",
+                    "mean_sla_risk_score",
+                    "median_sla_risk_score",
+                    "mean_risk_factor_count",
+                    "comparison_eligible",
+                ]
+            ]
+        )
+
+    result = pd.concat(
+        results,
+        ignore_index=True,
+    )
+
+    return result
+
+def validate_sla_risk_concentration_analysis(
+    result: pd.DataFrame,
+    source_df: pd.DataFrame,
+) -> None:
+    """
+    Validate historical SLA-risk concentration analysis.
+
+    Validation covers dimension coverage, incident-count reconciliation,
+    risk-count bounds, percentage bounds, score bounds, and eligibility
+    rules.
+
+    This validates descriptive historical analysis and does not validate
+    predictive model performance.
+    """
+
+    required_columns = [
+        "dimension",
+        "dimension_value",
+        "incident_count",
+        "elevated_risk_incident_count",
+        "elevated_risk_share_pct",
+        "critical_risk_incident_count",
+        "critical_risk_share_pct",
+        "mean_sla_risk_score",
+        "median_sla_risk_score",
+        "mean_risk_factor_count",
+        "comparison_eligible",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in result.columns
+    ]
+
+    if missing_columns:
+        raise AssertionError(
+            "Required SLA-risk concentration columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    expected_dimensions = {
+        "Category",
+        "Priority",
+        "Reassignment Bucket",
+        "Assignment Group",
+    }
+
+    actual_dimensions = set(
+        result["dimension"].astype(str).unique()
+    )
+
+    if actual_dimensions != expected_dimensions:
+        raise AssertionError(
+            "Unexpected SLA-risk concentration dimensions detected."
+        )
+
+    if result.empty:
+        raise AssertionError(
+            "SLA-risk concentration result is empty."
+        )
+
+    if result[
+        ["dimension", "dimension_value"]
+    ].duplicated().any():
+        raise AssertionError(
+            "Duplicate dimension-value combinations detected."
+        )
+
+    for dimension in expected_dimensions:
+
+        dimension_result = result[
+            result["dimension"] == dimension
+        ]
+
+        if dimension_result.empty:
+            raise AssertionError(
+                f"No results found for dimension: {dimension}"
+            )
+
+    count_columns = [
+        "incident_count",
+        "elevated_risk_incident_count",
+        "critical_risk_incident_count",
+    ]
+
+    for column in count_columns:
+        if (
+            result[column] < 0
+        ).any():
+            raise AssertionError(
+                f"Negative counts detected in {column}."
+            )
+
+    if (
+        result["elevated_risk_incident_count"]
+        > result["incident_count"]
+    ).any():
+        raise AssertionError(
+            "Elevated-risk incident counts exceed incident counts."
+        )
+
+    if (
+        result["critical_risk_incident_count"]
+        > result["elevated_risk_incident_count"]
+    ).any():
+        raise AssertionError(
+            "Critical-risk incident counts exceed elevated-risk counts."
+        )
+
+    percentage_columns = [
+        "elevated_risk_share_pct",
+        "critical_risk_share_pct",
+    ]
+
+    for column in percentage_columns:
+        if (
+            result[column] < 0
+        ).any() or (
+            result[column] > 100
+        ).any():
+            raise AssertionError(
+                f"Invalid percentages detected in {column}."
+            )
+
+    if (
+        result["mean_sla_risk_score"].isna().any()
+        or result["median_sla_risk_score"].isna().any()
+    ):
+        raise AssertionError(
+            "Missing SLA risk score statistics detected."
+        )
+
+    for column in [
+        "mean_sla_risk_score",
+        "median_sla_risk_score",
+    ]:
+        if (
+            result[column] < 0
+        ).any() or (
+            result[column] > SLA_RISK_SCORE_MAX
+        ).any():
+            raise AssertionError(
+                f"Risk scores outside [0, 100] detected in {column}."
+            )
+
+    if result["mean_risk_factor_count"].isna().any():
+        raise AssertionError(
+            "Missing mean risk-factor counts detected."
+        )
+
+    if (
+        result["mean_risk_factor_count"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative mean risk-factor counts detected."
+        )
+
+    for dimension, minimum_sample in [
+        ("Category", MIN_CATEGORY_SAMPLE),
+        ("Assignment Group", MIN_ASSIGNMENT_GROUP_SAMPLE),
+    ]:
+        dimension_result = result[
+            result["dimension"] == dimension
+        ]
+
+        expected_eligibility = (
+            dimension_result["incident_count"]
+            >= minimum_sample
+        )
+
+        if not (
+            dimension_result["comparison_eligible"].to_numpy()
+            == expected_eligibility.to_numpy()
+        ).all():
+            raise AssertionError(
+                f"Comparison eligibility is inconsistent for "
+                f"{dimension}."
+            )
+
+    for dimension in [
+        "Priority",
+        "Reassignment Bucket",
+    ]:
+        dimension_result = result[
+            result["dimension"] == dimension
+        ]
+
+        if not dimension_result["comparison_eligible"].all():
+            raise AssertionError(
+                f"{dimension} results must all be comparison eligible."
+            )
+
+    source_dimensions = {
+        "Category": "category",
+        "Priority": "priority",
+        "Reassignment Bucket": "reassignment_bucket",
+        "Assignment Group": "assignment_group",
+    }
+
+    for dimension, source_column in source_dimensions.items():
+
+        expected_count = (
+            source_df[source_column]
+            .dropna()
+            .nunique()
+        )
+
+        actual_count = result[
+            result["dimension"] == dimension
+        ]["dimension_value"].nunique()
+
+        if actual_count != expected_count:
+            raise AssertionError(
+                f"Dimension-value coverage mismatch for {dimension}."
+            )
 
 # ---------------------------------------------------------------------------
 # Category SLA analysis
@@ -3150,6 +3533,23 @@ def save_sla_risk_portfolio_summary_report(
         index=False,
     )
 
+def save_sla_risk_concentration_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save historical SLA-risk concentration analysis to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        SLA_RISK_CONCENTRATION_OUTPUT,
+        index=False,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Reporting
@@ -4072,6 +4472,50 @@ def main() -> None:
     )
 
     # -----------------------------------------------------------------------
+    # SLA risk concentration analysis
+    # -----------------------------------------------------------------------
+
+    sla_risk_concentration_result = (
+        build_sla_risk_concentration_analysis(
+            incident_risk_scores=incident_sla_risk_score_result,
+        )
+    )
+
+    validate_sla_risk_concentration_analysis(
+        result=sla_risk_concentration_result,
+        source_df=incident_sla_risk_score_result,
+    )
+
+    save_sla_risk_concentration_report(
+        sla_risk_concentration_result
+    )
+
+    print(
+        "\nSLA risk concentration analysis saved to:"
+    )
+
+    print(
+        SLA_RISK_CONCENTRATION_OUTPUT
+    )
+
+    print(
+        "\nTop elevated-risk concentrations:"
+    )
+
+    print(
+        sla_risk_concentration_result
+        .sort_values(
+            [
+                "elevated_risk_share_pct",
+                "elevated_risk_incident_count",
+            ],
+            ascending=False,
+        )
+        .head(15)
+        .to_string(index=False)
+    )
+
+    # -----------------------------------------------------------------------
     # Final validation status
     # -----------------------------------------------------------------------
 
@@ -4085,6 +4529,6 @@ def main() -> None:
     print("Incident SLA risk reference validation: PASSED")
     print("Incident SLA risk scoring validation: PASSED")
     print("SLA risk portfolio summary validation: PASSED")
-
+    print("SLA risk concentration validation: PASSED")
 if __name__ == "__main__":
     main()
