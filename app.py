@@ -306,7 +306,7 @@ with col2:
 
 st.dataframe(
     priority_sla,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -418,7 +418,7 @@ with col2:
 
 st.dataframe(
     reassignment_sla,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -638,7 +638,7 @@ with col2:
 
 st.dataframe(
     priority_resolution,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -731,7 +731,7 @@ with col2:
 
 st.dataframe(
     reassignment_sla,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -839,6 +839,6 @@ st.line_chart(
 
 st.dataframe(
     monthly_operational,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
