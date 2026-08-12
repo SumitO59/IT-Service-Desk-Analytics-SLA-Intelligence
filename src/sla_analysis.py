@@ -52,7 +52,9 @@ INCIDENT_SLA_RISK_REFERENCE_OUTPUT = (
 INCIDENT_SLA_RISK_SCORES_OUTPUT = (
     REPORT_DIR / "incident_sla_risk_scores.csv"
 )
-
+SLA_RISK_PORTFOLIO_OUTPUT = (
+    REPORT_DIR / "sla_risk_portfolio_summary.csv"
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -967,6 +969,224 @@ def validate_incident_sla_risk_scores(
                     f"Historical reference mapping mismatch for "
                     f"{reference_type}: {factor_value}"
                 )
+
+# ---------------------------------------------------------------------------
+# SLA risk portfolio summary
+# ---------------------------------------------------------------------------
+
+def build_sla_risk_portfolio_summary(
+    incident_risk_scores: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build an overall portfolio summary of historical SLA-risk scores.
+
+    The summary describes the distribution of the descriptive historical
+    SLA-risk index across configured risk bands.
+
+    This is descriptive historical analysis and does not represent
+    predicted SLA-breach probabilities.
+    """
+
+    required_columns = [
+        "sla_risk_band",
+        "sla_risk_score",
+        "risk_factor_count",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in incident_risk_scores.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "Required incident SLA-risk columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    if incident_risk_scores.empty:
+        raise ValueError(
+            "Incident SLA-risk score table is empty."
+        )
+
+    risk_band_order = [
+        "Low",
+        "Moderate",
+        "High",
+        "Critical",
+    ]
+
+    grouped = (
+        incident_risk_scores
+        .groupby(
+            "sla_risk_band",
+            observed=False,
+        )
+        .agg(
+            incident_count=("sla_risk_score", "size"),
+            mean_sla_risk_score=("sla_risk_score", "mean"),
+            median_sla_risk_score=("sla_risk_score", "median"),
+            min_sla_risk_score=("sla_risk_score", "min"),
+            max_sla_risk_score=("sla_risk_score", "max"),
+            mean_risk_factor_count=(
+                "risk_factor_count",
+                "mean",
+            ),
+        )
+        .reindex(risk_band_order)
+        .reset_index()
+    )
+
+    total_incidents = len(incident_risk_scores)
+
+    grouped["incident_share_pct"] = (
+        grouped["incident_count"]
+        / total_incidents
+        * 100.0
+    )
+
+    return grouped[
+        [
+            "sla_risk_band",
+            "incident_count",
+            "incident_share_pct",
+            "mean_sla_risk_score",
+            "median_sla_risk_score",
+            "min_sla_risk_score",
+            "max_sla_risk_score",
+            "mean_risk_factor_count",
+        ]
+    ]
+
+
+def validate_sla_risk_portfolio_summary(
+    result: pd.DataFrame,
+    source_df: pd.DataFrame,
+) -> None:
+    """
+    Validate the overall historical SLA-risk portfolio summary.
+
+    Validation covers risk-band preservation, incident-count
+    reconciliation, percentage reconciliation, score bounds, and
+    numerical validity.
+
+    This validates a descriptive historical risk index and does not
+    validate predictive model performance.
+    """
+
+    required_columns = [
+        "sla_risk_band",
+        "incident_count",
+        "incident_share_pct",
+        "mean_sla_risk_score",
+        "median_sla_risk_score",
+        "min_sla_risk_score",
+        "max_sla_risk_score",
+        "mean_risk_factor_count",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in result.columns
+    ]
+
+    if missing_columns:
+        raise AssertionError(
+            "Required SLA-risk portfolio columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    expected_bands = [
+        "Low",
+        "Moderate",
+        "High",
+        "Critical",
+    ]
+
+    actual_bands = (
+        result["sla_risk_band"]
+        .astype(str)
+        .tolist()
+    )
+
+    if actual_bands != expected_bands:
+        raise AssertionError(
+            "SLA-risk portfolio bands do not match the "
+            "configured risk-band order."
+        )
+
+    if len(result) != 4:
+        raise AssertionError(
+            "SLA-risk portfolio summary must contain exactly "
+            "four risk bands."
+        )
+
+    if (
+        result["incident_count"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative incident counts detected."
+        )
+
+    if result["incident_count"].sum() != len(source_df):
+        raise AssertionError(
+            "Portfolio incident counts do not reconcile with "
+            "the incident-level SLA-risk score table."
+        )
+
+    if (
+        result["incident_share_pct"] < 0
+    ).any() or (
+        result["incident_share_pct"] > 100
+    ).any():
+        raise AssertionError(
+            "Incident-share percentages outside [0, 100] detected."
+        )
+
+    if not np.isclose(
+        result["incident_share_pct"].sum(),
+        100.0,
+        atol=1e-10,
+    ):
+        raise AssertionError(
+            "Portfolio incident-share percentages do not sum to 100%."
+        )
+
+    score_columns = [
+        "mean_sla_risk_score",
+        "median_sla_risk_score",
+        "min_sla_risk_score",
+        "max_sla_risk_score",
+    ]
+
+    for column in score_columns:
+        if result[column].isna().any():
+            raise AssertionError(
+                f"Missing values detected in {column}."
+            )
+
+        if (
+            result[column] < 0
+        ).any() or (
+            result[column] > SLA_RISK_SCORE_MAX
+        ).any():
+            raise AssertionError(
+                f"Risk scores outside [0, 100] detected in {column}."
+            )
+
+    if result["mean_risk_factor_count"].isna().any():
+        raise AssertionError(
+            "Missing mean risk-factor counts detected."
+        )
+
+    if (
+        result["mean_risk_factor_count"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative mean risk-factor counts detected."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2913,6 +3133,23 @@ def save_incident_sla_risk_scores_report(
         index=False,
     )
 
+def save_sla_risk_portfolio_summary_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save the overall historical SLA-risk portfolio summary to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        SLA_RISK_PORTFOLIO_OUTPUT,
+        index=False,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Reporting
@@ -3799,6 +4036,40 @@ def main() -> None:
         f"{incident_sla_risk_score_result['sla_risk_score'].mean():.2f}"
     )
 
+    # -----------------------------------------------------------------------
+    # SLA risk portfolio summary
+    # -----------------------------------------------------------------------
+
+    sla_risk_portfolio_result = (
+        build_sla_risk_portfolio_summary(
+            incident_risk_scores=incident_sla_risk_score_result,
+        )
+    )
+
+    validate_sla_risk_portfolio_summary(
+        result=sla_risk_portfolio_result,
+        source_df=incident_sla_risk_score_result,
+    )
+
+    save_sla_risk_portfolio_summary_report(
+        sla_risk_portfolio_result
+    )
+
+    print(
+        "\nSLA risk portfolio summary saved to:"
+    )
+
+    print(
+        SLA_RISK_PORTFOLIO_OUTPUT
+    )
+
+    print(
+        "\nSLA risk portfolio distribution:"
+    )
+
+    print(
+        sla_risk_portfolio_result.to_string(index=False)
+    )
 
     # -----------------------------------------------------------------------
     # Final validation status
@@ -3813,6 +4084,7 @@ def main() -> None:
     print("Assignment-group driver validation: PASSED")
     print("Incident SLA risk reference validation: PASSED")
     print("Incident SLA risk scoring validation: PASSED")
+    print("SLA risk portfolio summary validation: PASSED")
 
 if __name__ == "__main__":
     main()
