@@ -49,6 +49,9 @@ ASSIGNMENT_GROUP_DRIVER_OUTPUT = (
 INCIDENT_SLA_RISK_REFERENCE_OUTPUT = (
     REPORT_DIR / "incident_sla_risk_reference.csv"
 )
+INCIDENT_SLA_RISK_SCORES_OUTPUT = (
+    REPORT_DIR / "incident_sla_risk_scores.csv"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +61,14 @@ INCIDENT_SLA_RISK_REFERENCE_OUTPUT = (
 MIN_CATEGORY_SAMPLE = 100
 MIN_ASSIGNMENT_GROUP_SAMPLE = 100
 CONFIDENCE_Z = 1.96
+
+# Historical incident-level SLA risk scoring configuration.
+SLA_RISK_BASELINE_RATE = 36.58
+SLA_RISK_SCORE_MAX = 100.0
+
+SLA_RISK_LOW_THRESHOLD = 25.0
+SLA_RISK_MODERATE_THRESHOLD = 50.0
+SLA_RISK_HIGH_THRESHOLD = 75.0
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +435,539 @@ def build_incident_sla_risk_reference(
     )
 
     return result\
+
+# ---------------------------------------------------------------------------
+# Incident-level SLA risk scoring
+# ---------------------------------------------------------------------------
+
+def build_incident_sla_risk_scores(
+    df: pd.DataFrame,
+    risk_reference: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build a historical, descriptive SLA-risk score for each incident.
+
+    The score combines historical SLA breach rates for priority,
+    reassignment bucket, category, and assignment group.
+
+    This is a descriptive historical risk index, not a predicted
+    probability and not a machine-learning model.
+    """
+
+    required_incident_columns = [
+        "number",
+        "priority",
+        "reassignment_bucket",
+        "category",
+        "assignment_group",
+    ]
+
+    required_reference_columns = [
+        "factor_type",
+        "factor_value",
+        "incident_count",
+        "breach_rate",
+        "breach_rate_ci_lower",
+        "breach_rate_ci_upper",
+    ]
+
+    missing_incident_columns = [
+        column
+        for column in required_incident_columns
+        if column not in df.columns
+    ]
+
+    if missing_incident_columns:
+        raise ValueError(
+            "Required incident columns missing from dataset: "
+            + ", ".join(missing_incident_columns)
+        )
+
+    missing_reference_columns = [
+        column
+        for column in required_reference_columns
+        if column not in risk_reference.columns
+    ]
+
+    if missing_reference_columns:
+        raise ValueError(
+            "Required risk-reference columns missing: "
+            + ", ".join(missing_reference_columns)
+        )
+
+    if risk_reference.empty:
+        raise ValueError(
+            "Risk reference table is empty."
+        )
+
+    if risk_reference[
+        ["factor_type", "factor_value"]
+    ].duplicated().any():
+        raise ValueError(
+            "Risk reference contains duplicate factor-value combinations."
+        )
+
+    if risk_reference["breach_rate"].isna().any():
+        raise ValueError(
+            "Risk reference contains missing breach rates."
+        )
+
+    if (
+        (risk_reference["breach_rate"] < 0).any()
+        or (risk_reference["breach_rate"] > 100).any()
+    ):
+        raise ValueError(
+            "Risk reference contains breach rates outside [0, 100]."
+        )
+
+    baseline = SLA_RISK_BASELINE_RATE
+    denominator = SLA_RISK_SCORE_MAX - baseline
+
+    if denominator <= 0:
+        raise ValueError(
+            "SLA risk scoring denominator must be positive."
+        )
+
+    result = df[
+        [
+            "number",
+            "priority",
+            "reassignment_bucket",
+            "category",
+            "assignment_group",
+        ]
+    ].copy()
+
+    factor_definitions = {
+        "priority": (
+            "Priority",
+            "priority_historical_breach_rate",
+            "priority_risk_contribution",
+        ),
+        "reassignment_bucket": (
+            "Reassignment Bucket",
+            "reassignment_historical_breach_rate",
+            "reassignment_risk_contribution",
+        ),
+        "category": (
+            "Category",
+            "category_historical_breach_rate",
+            "category_risk_contribution",
+        ),
+        "assignment_group": (
+            "Assignment Group",
+            "assignment_group_historical_breach_rate",
+            "assignment_group_risk_contribution",
+        ),
+    }
+
+    contribution_columns = []
+
+    for incident_column, (
+        reference_type,
+        rate_column,
+        contribution_column,
+    ) in factor_definitions.items():
+
+        reference_subset = risk_reference[
+            risk_reference["factor_type"] == reference_type
+        ][
+            [
+                "factor_value",
+                "breach_rate",
+            ]
+        ].copy()
+
+        reference_subset = reference_subset.rename(
+            columns={
+                "factor_value": incident_column,
+                "breach_rate": rate_column,
+            }
+        )
+
+        result = result.merge(
+            reference_subset,
+            on=incident_column,
+            how="left",
+            validate="many_to_one",
+        )
+
+        result[contribution_column] = (
+            (
+                result[rate_column] - baseline
+            ) / denominator
+        ).clip(
+            lower=0.0,
+            upper=1.0,
+        )
+
+        result.loc[
+            result[rate_column].isna(),
+            contribution_column,
+        ] = np.nan
+
+        contribution_columns.append(
+            contribution_column
+        )
+
+    result["risk_factor_count"] = (
+        result[contribution_columns]
+        .notna()
+        .sum(axis=1)
+    )
+
+    result["sla_risk_score"] = (
+        result[contribution_columns]
+        .mean(axis=1, skipna=True)
+        * SLA_RISK_SCORE_MAX
+    )
+
+    result["sla_risk_band"] = pd.cut(
+        result["sla_risk_score"],
+        bins=[
+            -np.inf,
+            SLA_RISK_LOW_THRESHOLD,
+            SLA_RISK_MODERATE_THRESHOLD,
+            SLA_RISK_HIGH_THRESHOLD,
+            np.inf,
+        ],
+        labels=[
+            "Low",
+            "Moderate",
+            "High",
+            "Critical",
+        ],
+        right=False,
+    )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Incident-level SLA risk scoring validation
+# ---------------------------------------------------------------------------
+
+def validate_incident_sla_risk_scores(
+    result: pd.DataFrame,
+    source_df: pd.DataFrame,
+    risk_reference: pd.DataFrame,
+) -> None:
+    """
+    Validate incident-level historical SLA-risk scores.
+
+    The validator checks row preservation, incident identity, factor
+    coverage, contribution bounds, score bounds, risk-band validity,
+    mathematical score reconstruction, and historical reference mapping.
+
+    This validation concerns a descriptive historical risk index and does
+    not validate predictive model performance.
+    """
+
+    required_result_columns = [
+        "number",
+        "priority",
+        "reassignment_bucket",
+        "category",
+        "assignment_group",
+        "priority_historical_breach_rate",
+        "reassignment_historical_breach_rate",
+        "category_historical_breach_rate",
+        "assignment_group_historical_breach_rate",
+        "priority_risk_contribution",
+        "reassignment_risk_contribution",
+        "category_risk_contribution",
+        "assignment_group_risk_contribution",
+        "risk_factor_count",
+        "sla_risk_score",
+        "sla_risk_band",
+    ]
+
+    missing_result_columns = [
+        column
+        for column in required_result_columns
+        if column not in result.columns
+    ]
+
+    if missing_result_columns:
+        raise AssertionError(
+            "Required SLA-risk score columns missing: "
+            + ", ".join(missing_result_columns)
+        )
+
+    if len(result) != len(source_df):
+        raise AssertionError(
+            "Incident-level SLA-risk scoring changed the source row count."
+        )
+
+    if result["number"].nunique() != source_df["number"].nunique():
+        raise AssertionError(
+            "Incident-level SLA-risk scoring changed incident identity."
+        )
+
+    if result["number"].duplicated().any():
+        raise AssertionError(
+            "Duplicate incident IDs detected in SLA-risk scoring output."
+        )
+
+    contribution_columns = [
+        "priority_risk_contribution",
+        "reassignment_risk_contribution",
+        "category_risk_contribution",
+        "assignment_group_risk_contribution",
+    ]
+
+    historical_rate_columns = [
+        "priority_historical_breach_rate",
+        "reassignment_historical_breach_rate",
+        "category_historical_breach_rate",
+        "assignment_group_historical_breach_rate",
+    ]
+
+    # -----------------------------------------------------------------------
+    # Factor coverage
+    # -----------------------------------------------------------------------
+
+    expected_factor_count = (
+        result[historical_rate_columns]
+        .notna()
+        .sum(axis=1)
+    )
+
+    if not (
+        result["risk_factor_count"].to_numpy()
+        == expected_factor_count.to_numpy()
+    ).all():
+        raise AssertionError(
+            "Risk-factor count is inconsistent with historical "
+            "reference coverage."
+        )
+
+    if (
+        result["risk_factor_count"] < 2
+    ).any() or (
+        result["risk_factor_count"] > 4
+    ).any():
+        raise AssertionError(
+            "Risk-factor count must be between 2 and 4."
+        )
+
+    # -----------------------------------------------------------------------
+    # Historical rate validation
+    # -----------------------------------------------------------------------
+
+    for column in historical_rate_columns:
+        valid_rates = result[column].dropna()
+
+        if (
+            (valid_rates < 0).any()
+            or (valid_rates > 100).any()
+        ):
+            raise AssertionError(
+                f"Historical breach rates outside [0, 100] detected "
+                f"in {column}."
+            )
+
+    # -----------------------------------------------------------------------
+    # Contribution validation
+    # -----------------------------------------------------------------------
+
+    for column in contribution_columns:
+        valid_contributions = result[column].dropna()
+
+        if (
+            (valid_contributions < 0).any()
+            or (valid_contributions > 1).any()
+        ):
+            raise AssertionError(
+                f"Risk contributions outside [0, 1] detected in {column}."
+            )
+
+    contribution_missingness = (
+        result[contribution_columns].isna().to_numpy()
+    )
+
+    rate_missingness = (
+        result[historical_rate_columns].isna().to_numpy()
+    )
+
+    if not (
+        contribution_missingness == rate_missingness
+    ).all():
+        raise AssertionError(
+            "Risk contribution missingness does not match "
+            "historical-rate coverage."
+        )
+
+    # -----------------------------------------------------------------------
+    # Score validation
+    # -----------------------------------------------------------------------
+
+    if result["sla_risk_score"].isna().any():
+        raise AssertionError(
+            "Missing SLA risk scores detected."
+        )
+
+    if (
+        result["sla_risk_score"] < 0
+    ).any() or (
+        result["sla_risk_score"] > SLA_RISK_SCORE_MAX
+    ).any():
+        raise AssertionError(
+            "SLA risk scores outside [0, 100] detected."
+        )
+
+    expected_score = (
+        result[contribution_columns]
+        .mean(axis=1, skipna=True)
+        * SLA_RISK_SCORE_MAX
+    )
+
+    score_error = (
+        result["sla_risk_score"] - expected_score
+    ).abs()
+
+    if score_error.max() > 1e-10:
+        raise AssertionError(
+            "SLA risk score does not match its mathematical definition."
+        )
+
+    # -----------------------------------------------------------------------
+    # Risk-band validation
+    # -----------------------------------------------------------------------
+
+    valid_bands = {
+        "Low",
+        "Moderate",
+        "High",
+        "Critical",
+    }
+
+    if result["sla_risk_band"].isna().any():
+        raise AssertionError(
+            "Missing SLA risk bands detected."
+        )
+
+    actual_bands = set(
+        result["sla_risk_band"]
+        .astype(str)
+        .unique()
+    )
+
+    unexpected_bands = actual_bands - valid_bands
+
+    if unexpected_bands:
+        raise AssertionError(
+            "Unexpected SLA risk bands detected: "
+            + ", ".join(sorted(unexpected_bands))
+        )
+
+    expected_bands = pd.cut(
+        result["sla_risk_score"],
+        bins=[
+            -np.inf,
+            SLA_RISK_LOW_THRESHOLD,
+            SLA_RISK_MODERATE_THRESHOLD,
+            SLA_RISK_HIGH_THRESHOLD,
+            np.inf,
+        ],
+        labels=[
+            "Low",
+            "Moderate",
+            "High",
+            "Critical",
+        ],
+        right=False,
+    )
+
+    if not (
+        result["sla_risk_band"].astype(str).to_numpy()
+        == expected_bands.astype(str).to_numpy()
+    ).all():
+        raise AssertionError(
+            "SLA risk bands are inconsistent with configured thresholds."
+        )
+
+    # -----------------------------------------------------------------------
+    # Historical reference mapping validation
+    # -----------------------------------------------------------------------
+
+    mapping_definitions = [
+        (
+            "priority",
+            "Priority",
+            "priority_historical_breach_rate",
+        ),
+        (
+            "reassignment_bucket",
+            "Reassignment Bucket",
+            "reassignment_historical_breach_rate",
+        ),
+        (
+            "category",
+            "Category",
+            "category_historical_breach_rate",
+        ),
+        (
+            "assignment_group",
+            "Assignment Group",
+            "assignment_group_historical_breach_rate",
+        ),
+    ]
+
+    for (
+        incident_column,
+        reference_type,
+        rate_column,
+    ) in mapping_definitions:
+
+        reference_subset = risk_reference[
+            risk_reference["factor_type"] == reference_type
+        ][
+            [
+                "factor_value",
+                "breach_rate",
+            ]
+        ]
+
+        expected_mapping = dict(
+            zip(
+                reference_subset["factor_value"],
+                reference_subset["breach_rate"],
+            )
+        )
+
+        for _, row in result[
+            [
+                incident_column,
+                rate_column,
+            ]
+        ].drop_duplicates().iterrows():
+
+            factor_value = row[incident_column]
+            actual_rate = row[rate_column]
+
+            if factor_value not in expected_mapping:
+                if not pd.isna(actual_rate):
+                    raise AssertionError(
+                        f"Unexpected historical reference mapping for "
+                        f"{reference_type}: {factor_value}"
+                    )
+                continue
+
+            expected_rate = expected_mapping[factor_value]
+
+            if pd.isna(actual_rate):
+                raise AssertionError(
+                    f"Missing historical reference mapping for "
+                    f"{reference_type}: {factor_value}"
+                )
+
+            if abs(actual_rate - expected_rate) > 1e-10:
+                raise AssertionError(
+                    f"Historical reference mapping mismatch for "
+                    f"{reference_type}: {factor_value}"
+                )
+
 
 # ---------------------------------------------------------------------------
 # Category SLA analysis
@@ -2351,6 +2895,25 @@ def save_incident_sla_risk_reference_report(
         index=False,
     )
 
+
+def save_incident_sla_risk_scores_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save incident-level historical SLA-risk scores to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        INCIDENT_SLA_RISK_SCORES_OUTPUT,
+        index=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -3170,9 +3733,9 @@ def main() -> None:
         assignment_group_driver_result
     )
 
-        # -----------------------------------------------------------------------
-    # Incident-level SLA risk reference analysis
-    # -----------------------------------------------------------------------
+      # -----------------------------------------------------------------------
+      # Incident-level SLA risk reference analysis
+      # -----------------------------------------------------------------------
 
     incident_sla_risk_reference_result = (
         build_incident_sla_risk_reference(
@@ -3196,6 +3759,47 @@ def main() -> None:
     )
 
 
+
+    # -----------------------------------------------------------------------
+    # Incident-level SLA risk scoring
+    # -----------------------------------------------------------------------
+
+    incident_sla_risk_score_result = (
+        build_incident_sla_risk_scores(
+            df=df,
+            risk_reference=incident_sla_risk_reference_result,
+        )
+    )
+
+    validate_incident_sla_risk_scores(
+        result=incident_sla_risk_score_result,
+        source_df=df,
+        risk_reference=incident_sla_risk_reference_result,
+    )
+
+    save_incident_sla_risk_scores_report(
+        incident_sla_risk_score_result
+    )
+
+    print(
+        "\nIncident-level SLA risk scoring report saved to:"
+    )
+
+    print(
+        INCIDENT_SLA_RISK_SCORES_OUTPUT
+    )
+
+    print(
+        f"Scored incidents: "
+        f"{len(incident_sla_risk_score_result):,}"
+    )
+
+    print(
+        f"Mean historical SLA risk score: "
+        f"{incident_sla_risk_score_result['sla_risk_score'].mean():.2f}"
+    )
+
+
     # -----------------------------------------------------------------------
     # Final validation status
     # -----------------------------------------------------------------------
@@ -3208,6 +3812,7 @@ def main() -> None:
     print("Assignment-group bottleneck validation: PASSED")
     print("Assignment-group driver validation: PASSED")
     print("Incident SLA risk reference validation: PASSED")
+    print("Incident SLA risk scoring validation: PASSED")
 
 if __name__ == "__main__":
     main()
