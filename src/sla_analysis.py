@@ -1,3 +1,5 @@
+
+
 """
 SLA Risk Analysis
 
@@ -40,6 +42,9 @@ ASSIGNMENT_GROUP_OUTPUT = (
 )
 ASSIGNMENT_GROUP_BOTTLENECK_OUTPUT = (
     REPORT_DIR / "assignment_group_bottleneck_analysis.csv"
+)
+ASSIGNMENT_GROUP_DRIVER_OUTPUT = (
+    REPORT_DIR / "assignment_group_driver_analysis.csv"
 )
 
 
@@ -849,7 +854,285 @@ def analyze_assignment_group_bottlenecks(
 
     return result
 
+# ---------------------------------------------------------------------------
+# Assignment-group operational driver analysis
+# ---------------------------------------------------------------------------
 
+def analyze_assignment_group_drivers(
+    assignment_group_result: pd.DataFrame,
+    assignment_group_bottleneck_result: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Analyze operational characteristics associated with assignment-group
+    bottleneck classification.
+
+    The analysis uses only assignment groups eligible for primary comparison.
+    It compares Critical Bottleneck groups against all other eligible groups
+    using reassignment and resolution-time metrics.
+
+    This is descriptive diagnostic analysis and does not imply causality.
+    """
+
+    required_group_columns = [
+        "assignment_group",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "median_resolution_hours",
+        "p90_resolution_hours",
+        "reassignment_rate",
+        "mean_reassignment_count",
+    ]
+
+    missing_group_columns = [
+        column
+        for column in required_group_columns
+        if column not in assignment_group_result.columns
+    ]
+
+    if missing_group_columns:
+        raise ValueError(
+            "Required assignment-group driver columns missing: "
+            + ", ".join(missing_group_columns)
+        )
+
+    required_bottleneck_columns = [
+        "assignment_group",
+        "bottleneck_class",
+    ]
+
+    missing_bottleneck_columns = [
+        column
+        for column in required_bottleneck_columns
+        if column not in assignment_group_bottleneck_result.columns
+    ]
+
+    if missing_bottleneck_columns:
+        raise ValueError(
+            "Required bottleneck columns missing: "
+            + ", ".join(missing_bottleneck_columns)
+        )
+
+    eligible = assignment_group_result[
+        assignment_group_result["eligible_for_comparison"]
+    ].copy()
+
+    if eligible.empty:
+        raise ValueError(
+            "No assignment groups are eligible for driver analysis."
+        )
+
+    bottleneck_classes = (
+        assignment_group_bottleneck_result[
+            [
+                "assignment_group",
+                "bottleneck_class",
+            ]
+        ]
+        .drop_duplicates(
+            subset=["assignment_group"]
+        )
+    )
+
+    result = eligible.merge(
+        bottleneck_classes,
+        on="assignment_group",
+        how="left",
+        validate="one_to_one",
+    )
+
+    if result["bottleneck_class"].isna().any():
+        raise AssertionError(
+            "Some eligible assignment groups are missing "
+            "bottleneck classifications."
+        )
+
+    result["driver_segment"] = np.where(
+        result["bottleneck_class"]
+        == "Critical Bottleneck",
+        "Critical Bottleneck",
+        "Other Eligible Groups",
+    )
+
+    output_columns = [
+        "assignment_group",
+        "bottleneck_class",
+        "driver_segment",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "median_resolution_hours",
+        "p90_resolution_hours",
+        "reassignment_rate",
+        "mean_reassignment_count",
+    ]
+
+    return (
+        result[output_columns]
+        .sort_values(
+            by=[
+                "driver_segment",
+                "breach_rate",
+                "incident_count",
+            ],
+            ascending=[
+                True,
+                False,
+                False,
+            ],
+        )
+        .reset_index(drop=True)
+    )
+
+# ---------------------------------------------------------------------------
+# Assignment-group driver validation
+# ---------------------------------------------------------------------------
+
+def validate_assignment_group_drivers(
+    result: pd.DataFrame,
+    assignment_group_result: pd.DataFrame,
+    assignment_group_bottleneck_result: pd.DataFrame,
+) -> None:
+    """
+    Validate assignment-group operational driver analysis.
+    """
+
+    required_columns = [
+        "assignment_group",
+        "bottleneck_class",
+        "driver_segment",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "median_resolution_hours",
+        "p90_resolution_hours",
+        "reassignment_rate",
+        "mean_reassignment_count",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in result.columns
+    ]
+
+    if missing_columns:
+        raise AssertionError(
+            "Required assignment-group driver columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    eligible = assignment_group_result[
+        assignment_group_result["eligible_for_comparison"]
+    ]
+
+    if len(result) != len(eligible):
+        raise AssertionError(
+            "Driver result count does not match the number "
+            "of eligible assignment groups: "
+            f"result={len(result)}, eligible={len(eligible)}"
+        )
+
+    if result["assignment_group"].nunique() != len(result):
+        raise AssertionError(
+            "Duplicate assignment groups detected in driver result."
+        )
+
+    if result[required_columns].isna().any().any():
+        raise AssertionError(
+            "Missing values detected in assignment-group driver result."
+        )
+
+    expected_classes = set(
+        assignment_group_bottleneck_result[
+            "bottleneck_class"
+        ].unique()
+    )
+
+    actual_classes = set(
+        result["bottleneck_class"].unique()
+    )
+
+    if actual_classes != expected_classes:
+        raise AssertionError(
+            "Bottleneck classifications do not reconcile "
+            "with the Milestone 3.6 result."
+        )
+
+    expected_driver_segment = np.where(
+        result["bottleneck_class"]
+        == "Critical Bottleneck",
+        "Critical Bottleneck",
+        "Other Eligible Groups",
+    )
+
+    if not (
+        result["driver_segment"].to_numpy()
+        == expected_driver_segment
+    ).all():
+        raise AssertionError(
+            "Driver-segment classification is inconsistent."
+        )
+
+    source_lookup = (
+        eligible[
+            [
+                "assignment_group",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "median_resolution_hours",
+                "p90_resolution_hours",
+                "reassignment_rate",
+                "mean_reassignment_count",
+            ]
+        ]
+        .set_index("assignment_group")
+        .sort_index()
+    )
+
+    result_lookup = (
+        result[
+            [
+                "assignment_group",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "median_resolution_hours",
+                "p90_resolution_hours",
+                "reassignment_rate",
+                "mean_reassignment_count",
+            ]
+        ]
+        .set_index("assignment_group")
+        .sort_index()
+    )
+
+    if not np.allclose(
+        source_lookup.to_numpy(),
+        result_lookup.to_numpy(),
+        equal_nan=True,
+    ):
+        raise AssertionError(
+            "Operational driver metrics do not reconcile "
+            "with the validated assignment-group analysis."
+        )
+
+    critical_count = (
+        result["driver_segment"]
+        == "Critical Bottleneck"
+    ).sum()
+
+    if critical_count != (
+        assignment_group_bottleneck_result[
+            "bottleneck_class"
+        ]
+        == "Critical Bottleneck"
+    ).sum():
+        raise AssertionError(
+            "Critical-bottleneck count does not reconcile "
+            "with Milestone 3.6."
+        )
 # ---------------------------------------------------------------------------
 # Assignment-group bottleneck validation
 # ---------------------------------------------------------------------------
@@ -1740,6 +2023,24 @@ def save_assignment_group_bottleneck_report(
 
 
 
+def save_assignment_group_driver_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save assignment-group operational driver analysis to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        ASSIGNMENT_GROUP_DRIVER_OUTPUT,
+        index=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Terminal summaries
 # ---------------------------------------------------------------------------
@@ -2180,6 +2481,83 @@ def print_assignment_group_bottleneck_summary(
     print(ASSIGNMENT_GROUP_BOTTLENECK_OUTPUT)
 
 
+def print_assignment_group_driver_summary(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Print assignment-group operational driver analysis.
+
+    Critical Bottleneck groups are compared with all other eligible
+    assignment groups using reassignment and resolution-time metrics.
+    """
+
+    critical = result[
+        result["driver_segment"] == "Critical Bottleneck"
+    ]
+
+    other = result[
+        result["driver_segment"] == "Other Eligible Groups"
+    ]
+
+    print("\n" + "=" * 70)
+    print("ASSIGNMENT-GROUP OPERATIONAL DRIVER ANALYSIS")
+    print("=" * 70)
+
+    print(
+        f"\nCritical Bottleneck groups: {len(critical)}"
+    )
+
+    print(
+        f"Other eligible groups: {len(other)}"
+    )
+
+    if not critical.empty and not other.empty:
+        comparison = pd.DataFrame(
+            {
+                "metric": [
+                    "Median breach rate (%)",
+                    "Median resolution time (hours)",
+                    "Median P90 resolution time (hours)",
+                    "Median reassignment rate (%)",
+                    "Median mean reassignment count",
+                ],
+                "critical_bottlenecks": [
+                    critical["breach_rate"].median(),
+                    critical["median_resolution_hours"].median(),
+                    critical["p90_resolution_hours"].median(),
+                    critical["reassignment_rate"].median(),
+                    critical["mean_reassignment_count"].median(),
+                ],
+                "other_eligible_groups": [
+                    other["breach_rate"].median(),
+                    other["median_resolution_hours"].median(),
+                    other["p90_resolution_hours"].median(),
+                    other["reassignment_rate"].median(),
+                    other["mean_reassignment_count"].median(),
+                ],
+            }
+        )
+
+        comparison["difference"] = (
+            comparison["critical_bottlenecks"]
+            - comparison["other_eligible_groups"]
+        )
+
+        print(
+            "\nCritical Bottlenecks vs Other Eligible Groups:"
+        )
+
+        print(
+            comparison.to_string(index=False)
+        )
+
+    print(
+        "\nAssignment-group driver report saved to:"
+    )
+
+    print(ASSIGNMENT_GROUP_DRIVER_OUTPUT)
+
+
 def main() -> None:
     """
     Run Milestone 3 SLA risk analysis.
@@ -2322,6 +2700,36 @@ def main() -> None:
     print_assignment_group_bottleneck_summary(
         assignment_group_bottleneck_result
     )
+
+    # -----------------------------------------------------------------------
+    # Assignment-group operational driver analysis
+    # -----------------------------------------------------------------------
+
+    assignment_group_driver_result = (
+        analyze_assignment_group_drivers(
+            assignment_group_result=assignment_group_result,
+            assignment_group_bottleneck_result=(
+                assignment_group_bottleneck_result
+            ),
+        )
+    )
+
+    validate_assignment_group_drivers(
+        result=assignment_group_driver_result,
+        assignment_group_result=assignment_group_result,
+        assignment_group_bottleneck_result=(
+            assignment_group_bottleneck_result
+        ),
+    )
+
+    save_assignment_group_driver_report(
+        assignment_group_driver_result
+    )
+
+    print_assignment_group_driver_summary(
+        assignment_group_driver_result
+    )
+
     # -----------------------------------------------------------------------
     # Final validation status
     # -----------------------------------------------------------------------
@@ -2332,6 +2740,7 @@ def main() -> None:
     print("Reassignment resolution validation: PASSED")
     print("Assignment-group validation: PASSED")
     print("Assignment-group bottleneck validation: PASSED")
+    print("Assignment-group driver validation: PASSED")
 
 
 if __name__ == "__main__":
