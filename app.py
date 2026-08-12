@@ -310,9 +310,8 @@ st.dataframe(
     hide_index=True,
 )
 
-
 # ============================================================================
-# SLA PERFORMANCE BY REASSIGNMENT
+# SLA PERFORMANCE BY REASSIGNMENT INTENSITY
 # ============================================================================
 
 @st.cache_data
@@ -320,22 +319,8 @@ def load_reassignment_sla_data():
     """Load SLA performance grouped by reassignment intensity."""
 
     query = """
-        WITH reassignment_classified AS (
-            SELECT
-                CASE
-                    WHEN reassignment_bucket = '0' THEN '0'
-                    WHEN reassignment_bucket = '1-2' THEN '1-2'
-                    WHEN reassignment_bucket = '3-5' THEN '3-5'
-                    WHEN reassignment_bucket = '6+' THEN '6+'
-                    ELSE 'Unknown'
-                END AS reassignment_level,
-                made_sla,
-                sla_breached
-            FROM incidents
-        )
-
         SELECT
-            reassignment_level,
+            reassignment_bucket AS reassignment_level,
 
             COUNT(*) AS incident_count,
 
@@ -357,12 +342,12 @@ def load_reassignment_sla_data():
                 2
             ) AS sla_breach_rate_pct
 
-        FROM reassignment_classified
+        FROM incidents
 
-        GROUP BY reassignment_level
+        GROUP BY reassignment_bucket
 
         ORDER BY
-            CASE reassignment_level
+            CASE reassignment_bucket
                 WHEN '0' THEN 1
                 WHEN '1-2' THEN 2
                 WHEN '3-5' THEN 3
@@ -381,29 +366,42 @@ reassignment_sla = load_reassignment_sla_data()
 
 st.divider()
 
-st.subheader("SLA Risk by Reassignment Intensity")
+st.subheader("SLA Performance by Reassignment Intensity")
 
 st.caption(
-    "SLA breach exposure increases sharply as incidents are reassigned "
-    "across more operational teams."
+    "SLA performance deteriorates sharply as incidents move through "
+    "multiple reassignment cycles."
 )
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
+    st.markdown("**SLA Compliance Rate**")
+
+    compliance_chart = reassignment_sla.set_index(
+        "reassignment_level"
+    )["sla_compliance_rate_pct"]
+
+    st.bar_chart(
+        compliance_chart,
+        y_label="SLA Compliance (%)",
+        x_label="Reassignment Bucket",
+    )
+
+with col2:
     st.markdown("**SLA Breach Rate**")
 
-    reassignment_breach_chart = reassignment_sla.set_index(
+    breach_chart = reassignment_sla.set_index(
         "reassignment_level"
     )["sla_breach_rate_pct"]
 
     st.bar_chart(
-        reassignment_breach_chart,
+        breach_chart,
         y_label="SLA Breach (%)",
-        x_label="Reassignment Count",
+        x_label="Reassignment Bucket",
     )
 
-with col2:
+with col3:
     st.markdown("**Incident Volume**")
 
     reassignment_volume_chart = reassignment_sla.set_index(
@@ -413,7 +411,7 @@ with col2:
     st.bar_chart(
         reassignment_volume_chart,
         y_label="Incidents",
-        x_label="Reassignment Count",
+        x_label="Reassignment Bucket",
     )
 
 st.dataframe(
@@ -421,7 +419,6 @@ st.dataframe(
     width="stretch",
     hide_index=True,
 )
-
 # ============================================================================
 # RESOLUTION-TIME PERFORMANCE
 # ============================================================================
@@ -638,99 +635,6 @@ with col2:
 
 st.dataframe(
     priority_resolution,
-    width="stretch",
-    hide_index=True,
-)
-
-# ============================================================================
-# REASSIGNMENT IMPACT ON SLA
-# ============================================================================
-
-st.divider()
-
-st.subheader("SLA Performance by Reassignment Intensity")
-
-st.caption(
-    "SLA compliance deteriorates sharply as incidents are reassigned more frequently."
-)
-
-
-@st.cache_data
-def load_reassignment_sla_data():
-    """Load SLA performance metrics grouped by reassignment bucket."""
-
-    query = """
-        SELECT
-            reassignment_bucket AS reassignment_level,
-
-            COUNT(*) AS incident_count,
-
-            ROUND(
-                100.0 * COUNT(*) FILTER (
-                    WHERE made_sla = TRUE
-                ) / COUNT(*),
-                2
-            ) AS sla_compliance_rate_pct,
-
-            ROUND(
-                100.0 * COUNT(*) FILTER (
-                    WHERE sla_breached = TRUE
-                ) / COUNT(*),
-                2
-            ) AS sla_breach_rate_pct
-
-        FROM incidents
-
-        GROUP BY reassignment_bucket
-
-        ORDER BY
-            CASE reassignment_bucket
-                WHEN '0' THEN 1
-                WHEN '1-2' THEN 2
-                WHEN '3-5' THEN 3
-                WHEN '6+' THEN 4
-                ELSE 5
-            END;
-    """
-
-    engine = get_engine()
-
-    with engine.connect() as connection:
-        return pd.read_sql(text(query), connection)
-
-
-reassignment_sla = load_reassignment_sla_data()
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown("**SLA Compliance Rate**")
-
-    compliance_chart = reassignment_sla.set_index(
-        "reassignment_level"
-    )["sla_compliance_rate_pct"]
-
-    st.bar_chart(
-        compliance_chart,
-        y_label="SLA Compliance (%)",
-        x_label="Reassignment Bucket",
-    )
-
-with col2:
-    st.markdown("**SLA Breach Rate**")
-
-    breach_chart = reassignment_sla.set_index(
-        "reassignment_level"
-    )["sla_breach_rate_pct"]
-
-    st.bar_chart(
-        breach_chart,
-        y_label="SLA Breach (%)",
-        x_label="Reassignment Bucket",
-    )
-
-st.dataframe(
-    reassignment_sla,
     width="stretch",
     hide_index=True,
 )
