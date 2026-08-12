@@ -38,6 +38,9 @@ REASSIGNMENT_RESOLUTION_OUTPUT = (
 ASSIGNMENT_GROUP_OUTPUT = (
     REPORT_DIR / "assignment_group_performance.csv"
 )
+ASSIGNMENT_GROUP_BOTTLENECK_OUTPUT = (
+    REPORT_DIR / "assignment_group_bottleneck_analysis.csv"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -724,7 +727,286 @@ def analyze_assignment_group_performance(
 
     return grouped
 
+# ---------------------------------------------------------------------------
+# Assignment-group bottleneck analysis
+# ---------------------------------------------------------------------------
 
+def analyze_assignment_group_bottlenecks(
+    assignment_group_result: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Classify eligible assignment groups by operational volume and SLA risk.
+
+    Classification is based on the median incident volume and median SLA
+    breach rate among assignment groups eligible for primary comparison.
+
+    The analysis is descriptive and intended for operational prioritization.
+    It does not imply causal relationships.
+    """
+
+    required_columns = [
+        "assignment_group",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "median_resolution_hours",
+        "p90_resolution_hours",
+        "eligible_for_comparison",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in assignment_group_result.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "Required assignment-group columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    eligible = assignment_group_result[
+        assignment_group_result["eligible_for_comparison"]
+    ].copy()
+
+    if eligible.empty:
+        raise ValueError(
+            "No assignment groups are eligible for bottleneck analysis."
+        )
+
+    volume_threshold = eligible["incident_count"].median()
+    breach_rate_threshold = eligible["breach_rate"].median()
+
+    eligible["volume_class"] = np.where(
+        eligible["incident_count"] >= volume_threshold,
+        "High Volume",
+        "Lower Volume",
+    )
+
+    eligible["breach_risk_class"] = np.where(
+        eligible["breach_rate"] >= breach_rate_threshold,
+        "High Breach Risk",
+        "Lower Breach Risk",
+    )
+
+    eligible["bottleneck_class"] = np.select(
+        [
+            (
+                (eligible["incident_count"] >= volume_threshold)
+                & (eligible["breach_rate"] >= breach_rate_threshold)
+            ),
+            (
+                (eligible["incident_count"] >= volume_threshold)
+                & (eligible["breach_rate"] < breach_rate_threshold)
+            ),
+            (
+                (eligible["incident_count"] < volume_threshold)
+                & (eligible["breach_rate"] >= breach_rate_threshold)
+            ),
+        ],
+        [
+            "Critical Bottleneck",
+            "Volume Bottleneck",
+            "SLA Risk",
+        ],
+        default="Lower Priority",
+    )
+
+    eligible["volume_threshold"] = volume_threshold
+    eligible["breach_rate_threshold"] = breach_rate_threshold
+
+    output_columns = [
+        "assignment_group",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "median_resolution_hours",
+        "p90_resolution_hours",
+        "volume_class",
+        "breach_risk_class",
+        "bottleneck_class",
+        "volume_threshold",
+        "breach_rate_threshold",
+    ]
+
+    result = (
+        eligible[output_columns]
+        .sort_values(
+            by=[
+                "bottleneck_class",
+                "breach_rate",
+                "incident_count",
+            ],
+            ascending=[
+                True,
+                False,
+                False,
+            ],
+        )
+        .reset_index(drop=True)
+    )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Assignment-group bottleneck validation
+# ---------------------------------------------------------------------------
+
+def validate_assignment_group_bottlenecks(
+    result: pd.DataFrame,
+    assignment_group_result: pd.DataFrame,
+) -> None:
+    """
+    Validate assignment-group bottleneck classification.
+
+    The validator ensures that only eligible assignment groups are classified,
+    that all four classification dimensions are internally consistent, and
+    that the classification counts reconcile with the eligible population.
+    """
+
+    required_columns = [
+        "assignment_group",
+        "incident_count",
+        "breach_rate",
+        "volume_class",
+        "breach_risk_class",
+        "bottleneck_class",
+        "volume_threshold",
+        "breach_rate_threshold",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in result.columns
+    ]
+
+    if missing_columns:
+        raise AssertionError(
+            "Required bottleneck columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    eligible_count = (
+        assignment_group_result["eligible_for_comparison"]
+        .sum()
+    )
+
+    if len(result) != eligible_count:
+        raise AssertionError(
+            "Bottleneck result count does not match the number "
+            "of eligible assignment groups: "
+            f"result={len(result)}, eligible={eligible_count}"
+        )
+
+    if result["assignment_group"].nunique() != len(result):
+        raise AssertionError(
+            "Duplicate assignment groups detected in bottleneck result."
+        )
+
+    if result[required_columns].isna().any().any():
+        raise AssertionError(
+            "Missing values detected in required bottleneck fields."
+        )
+
+    volume_threshold = result["volume_threshold"].iloc[0]
+    breach_rate_threshold = result["breach_rate_threshold"].iloc[0]
+
+    expected_volume_class = np.where(
+        result["incident_count"] >= volume_threshold,
+        "High Volume",
+        "Lower Volume",
+    )
+
+    if not (
+        result["volume_class"].to_numpy()
+        == expected_volume_class
+    ).all():
+        raise AssertionError(
+            "Assignment-group volume classification is inconsistent "
+            "with the volume threshold."
+        )
+
+    expected_breach_risk_class = np.where(
+        result["breach_rate"] >= breach_rate_threshold,
+        "High Breach Risk",
+        "Lower Breach Risk",
+    )
+
+    if not (
+        result["breach_risk_class"].to_numpy()
+        == expected_breach_risk_class
+    ).all():
+        raise AssertionError(
+            "Assignment-group breach-risk classification is inconsistent "
+            "with the breach-rate threshold."
+        )
+
+    expected_bottleneck_class = np.select(
+        [
+            (
+                (result["incident_count"] >= volume_threshold)
+                & (result["breach_rate"] >= breach_rate_threshold)
+            ),
+            (
+                (result["incident_count"] >= volume_threshold)
+                & (result["breach_rate"] < breach_rate_threshold)
+            ),
+            (
+                (result["incident_count"] < volume_threshold)
+                & (result["breach_rate"] >= breach_rate_threshold)
+            ),
+        ],
+        [
+            "Critical Bottleneck",
+            "Volume Bottleneck",
+            "SLA Risk",
+        ],
+        default="Lower Priority",
+    )
+
+    if not (
+        result["bottleneck_class"].to_numpy()
+        == expected_bottleneck_class
+    ).all():
+        raise AssertionError(
+            "Assignment-group bottleneck classification is inconsistent "
+            "with the volume and breach-rate thresholds."
+        )
+
+    valid_classes = {
+        "Critical Bottleneck",
+        "Volume Bottleneck",
+        "SLA Risk",
+        "Lower Priority",
+    }
+
+    unexpected_classes = set(
+        result["bottleneck_class"].unique()
+    ) - valid_classes
+
+    if unexpected_classes:
+        raise AssertionError(
+            "Unexpected bottleneck classifications detected: "
+            + ", ".join(sorted(unexpected_classes))
+        )
+
+    threshold_values = result[
+        [
+            "volume_threshold",
+            "breach_rate_threshold",
+        ]
+    ].nunique()
+
+    if (
+        threshold_values["volume_threshold"] != 1
+        or threshold_values["breach_rate_threshold"] != 1
+    ):
+        raise AssertionError(
+            "Bottleneck thresholds are not consistent across results."
+        )
 # ---------------------------------------------------------------------------
 # Category validation
 # ---------------------------------------------------------------------------
@@ -1439,6 +1721,24 @@ def save_assignment_group_report(
         index=False,
     )
 
+def save_assignment_group_bottleneck_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save assignment-group bottleneck classification to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        ASSIGNMENT_GROUP_BOTTLENECK_OUTPUT,
+        index=False,
+    )
+
+
 
 # ---------------------------------------------------------------------------
 # Terminal summaries
@@ -1761,6 +2061,125 @@ def print_assignment_group_summary(
 # Main execution
 # ---------------------------------------------------------------------------
 
+def print_assignment_group_bottleneck_summary(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Print assignment-group operational bottleneck analysis.
+    """
+
+    volume_threshold = result["volume_threshold"].iloc[0]
+    breach_rate_threshold = result["breach_rate_threshold"].iloc[0]
+
+    class_counts = (
+        result["bottleneck_class"]
+        .value_counts()
+        .reindex(
+            [
+                "Critical Bottleneck",
+                "Volume Bottleneck",
+                "SLA Risk",
+                "Lower Priority",
+            ],
+            fill_value=0,
+        )
+    )
+
+    critical = result[
+        result["bottleneck_class"]
+        == "Critical Bottleneck"
+    ]
+
+    sla_risk = result[
+        result["bottleneck_class"]
+        == "SLA Risk"
+    ]
+
+    print("\n" + "=" * 70)
+    print("ASSIGNMENT-GROUP OPERATIONAL BOTTLENECK ANALYSIS")
+    print("=" * 70)
+
+    print(
+        f"\nEligible assignment groups: {len(result)}"
+    )
+
+    print(
+        f"Median incident-volume threshold: "
+        f"{volume_threshold:,.0f}"
+    )
+
+    print(
+        f"Median SLA breach-rate threshold: "
+        f"{breach_rate_threshold:.2f}%"
+    )
+
+    print("\nBottleneck classification counts:")
+
+    print(
+        class_counts.to_string()
+    )
+
+    print("\nCritical bottlenecks:")
+
+    if critical.empty:
+        print("None")
+    else:
+        print(
+            critical[
+                [
+                    "assignment_group",
+                    "incident_count",
+                    "sla_breaches",
+                    "breach_rate",
+                ]
+            ]
+            .sort_values(
+                by=[
+                    "breach_rate",
+                    "incident_count",
+                ],
+                ascending=[
+                    False,
+                    False,
+                ],
+            )
+            .to_string(index=False)
+        )
+
+    print("\nSLA-risk groups:")
+
+    if sla_risk.empty:
+        print("None")
+    else:
+        print(
+            sla_risk[
+                [
+                    "assignment_group",
+                    "incident_count",
+                    "sla_breaches",
+                    "breach_rate",
+                ]
+            ]
+            .sort_values(
+                by=[
+                    "breach_rate",
+                    "incident_count",
+                ],
+                ascending=[
+                    False,
+                    False,
+                ],
+            )
+            .to_string(index=False)
+        )
+
+    print(
+        "\nAssignment-group bottleneck report saved to:"
+    )
+
+    print(ASSIGNMENT_GROUP_BOTTLENECK_OUTPUT)
+
+
 def main() -> None:
     """
     Run Milestone 3 SLA risk analysis.
@@ -1885,6 +2304,25 @@ def main() -> None:
     )
 
     # -----------------------------------------------------------------------
+    # Assignment-group operational bottleneck analysis
+    # -----------------------------------------------------------------------
+
+    assignment_group_bottleneck_result = (
+        analyze_assignment_group_bottlenecks(
+            assignment_group_result
+        )
+    )
+    validate_assignment_group_bottlenecks(
+        result=assignment_group_bottleneck_result,
+        assignment_group_result=assignment_group_result,
+    )
+    save_assignment_group_bottleneck_report(
+        assignment_group_bottleneck_result
+    )
+    print_assignment_group_bottleneck_summary(
+        assignment_group_bottleneck_result
+    )
+    # -----------------------------------------------------------------------
     # Final validation status
     # -----------------------------------------------------------------------
 
@@ -1893,6 +2331,7 @@ def main() -> None:
     print("Reassignment validation: PASSED")
     print("Reassignment resolution validation: PASSED")
     print("Assignment-group validation: PASSED")
+    print("Assignment-group bottleneck validation: PASSED")
 
 
 if __name__ == "__main__":
