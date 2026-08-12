@@ -58,6 +58,9 @@ SLA_RISK_PORTFOLIO_OUTPUT = (
 SLA_RISK_CONCENTRATION_OUTPUT = (
     REPORT_DIR / "sla_risk_concentration_analysis.csv"
 )
+MONTHLY_OPERATIONAL_OUTPUT = (
+    REPORT_DIR / "monthly_operational_performance.csv"
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -65,6 +68,7 @@ SLA_RISK_CONCENTRATION_OUTPUT = (
 
 MIN_CATEGORY_SAMPLE = 100
 MIN_ASSIGNMENT_GROUP_SAMPLE = 100
+MIN_MONTHLY_SAMPLE = 100
 CONFIDENCE_Z = 1.96
 
 # Historical incident-level SLA risk scoring configuration.
@@ -1571,6 +1575,289 @@ def validate_sla_risk_concentration_analysis(
             raise AssertionError(
                 f"Dimension-value coverage mismatch for {dimension}."
             )
+
+# ---------------------------------------------------------------------------
+# Monthly operational performance analysis
+# ---------------------------------------------------------------------------
+
+def build_monthly_operational_performance(
+    df: pd.DataFrame,
+    min_sample: int = MIN_MONTHLY_SAMPLE,
+) -> pd.DataFrame:
+    """
+    Calculate monthly operational performance metrics.
+
+    Monthly grouping is based on the validated `opened_month` field from
+    the cleaned incident-level dataset.
+
+    Months with fewer than `min_sample` incidents are retained but marked
+    as ineligible for primary comparison.
+
+    This analysis is descriptive historical analysis and does not represent
+    predicted future SLA-breach probabilities.
+    """
+
+    required_columns = [
+        "number",
+        "opened_month",
+        "sla_breached",
+        "resolution_time_hours",
+        "reassignment_count",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "Required monthly operational columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    if df.empty:
+        raise ValueError(
+            "Incident dataset is empty."
+        )
+
+    monthly_df = df.copy()
+
+    monthly_df = monthly_df.dropna(
+        subset=["opened_month"]
+    )
+
+    if monthly_df.empty:
+        raise ValueError(
+            "No valid opened_month values available."
+        )
+
+    grouped = (
+        monthly_df
+        .groupby(
+            "opened_month",
+            observed=True,
+        )
+        .agg(
+            incident_count=("number", "nunique"),
+            sla_breaches=("sla_breached", "sum"),
+            median_resolution_hours=(
+                "resolution_time_hours",
+                "median",
+            ),
+            p90_resolution_hours=(
+                "resolution_time_hours",
+                lambda x: x.quantile(0.90),
+            ),
+            reassigned_incidents=(
+                "reassignment_count",
+                lambda x: (x > 0).sum(),
+            ),
+            mean_reassignment_count=(
+                "reassignment_count",
+                "mean",
+            ),
+        )
+        .reset_index()
+        .sort_values(
+            "opened_month"
+        )
+        .reset_index(drop=True)
+    )
+
+    grouped["breach_rate"] = (
+        grouped["sla_breaches"]
+        / grouped["incident_count"]
+        * 100.0
+    )
+
+    grouped["reassignment_rate"] = (
+        grouped["reassigned_incidents"]
+        / grouped["incident_count"]
+        * 100.0
+    )
+
+    grouped["comparison_eligible"] = (
+        grouped["incident_count"] >= min_sample
+    )
+
+    return grouped[
+        [
+            "opened_month",
+            "incident_count",
+            "sla_breaches",
+            "breach_rate",
+            "median_resolution_hours",
+            "p90_resolution_hours",
+            "reassignment_rate",
+            "mean_reassignment_count",
+            "comparison_eligible",
+        ]
+    ]
+
+def validate_monthly_operational_performance(
+    result: pd.DataFrame,
+    source_df: pd.DataFrame,
+) -> None:
+    """
+    Validate monthly operational performance analysis.
+
+    Validation covers month preservation, incident-count reconciliation,
+    SLA-breach bounds, rate bounds, resolution-time validity, reassignment
+    metrics, and comparison-eligibility rules.
+    """
+
+    required_columns = [
+        "opened_month",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "median_resolution_hours",
+        "p90_resolution_hours",
+        "reassignment_rate",
+        "mean_reassignment_count",
+        "comparison_eligible",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in result.columns
+    ]
+
+    if missing_columns:
+        raise AssertionError(
+            "Required monthly operational columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    if result.empty:
+        raise AssertionError(
+            "Monthly operational performance result is empty."
+        )
+
+    if result["opened_month"].isna().any():
+        raise AssertionError(
+            "Missing opened_month values detected."
+        )
+
+    if not result["opened_month"].is_monotonic_increasing:
+        raise AssertionError(
+            "Monthly operational results are not chronologically ordered."
+        )
+
+    if result["opened_month"].duplicated().any():
+        raise AssertionError(
+            "Duplicate opened_month values detected."
+        )
+
+    if (
+        result["incident_count"] <= 0
+    ).any():
+        raise AssertionError(
+            "Non-positive monthly incident counts detected."
+        )
+
+    if (
+        result["sla_breaches"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative SLA-breach counts detected."
+        )
+
+    if (
+        result["sla_breaches"]
+        > result["incident_count"]
+    ).any():
+        raise AssertionError(
+            "SLA-breach counts exceed incident counts."
+        )
+
+    if result["incident_count"].sum() != len(source_df):
+        raise AssertionError(
+            "Monthly incident counts do not reconcile with "
+            "the source incident dataset."
+        )
+
+    if (
+        result["breach_rate"] < 0
+    ).any() or (
+        result["breach_rate"] > 100
+    ).any():
+        raise AssertionError(
+            "Monthly SLA-breach rates outside [0, 100] detected."
+        )
+
+    if (
+        result["reassignment_rate"] < 0
+    ).any() or (
+        result["reassignment_rate"] > 100
+    ).any():
+        raise AssertionError(
+            "Monthly reassignment rates outside [0, 100] detected."
+        )
+
+    if result["mean_reassignment_count"].isna().any():
+        raise AssertionError(
+            "Missing monthly mean reassignment counts detected."
+        )
+
+    if (
+        result["mean_reassignment_count"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative monthly mean reassignment counts detected."
+        )
+
+    for column in [
+        "median_resolution_hours",
+        "p90_resolution_hours",
+    ]:
+        non_missing = result[column].dropna()
+
+        if (
+            non_missing < 0
+        ).any():
+            raise AssertionError(
+                f"Negative values detected in {column}."
+            )
+
+    expected_eligibility = (
+        result["incident_count"]
+        >= MIN_MONTHLY_SAMPLE
+    )
+
+    if not result["comparison_eligible"].equals(
+        expected_eligibility
+    ):
+        raise AssertionError(
+            "Monthly comparison-eligibility flags do not match "
+            "the configured minimum sample threshold."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Monthly operational report persistence
+# ---------------------------------------------------------------------------
+
+def save_monthly_operational_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save monthly operational performance analysis to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        MONTHLY_OPERATIONAL_OUTPUT,
+        index=False,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Category SLA analysis
@@ -3551,9 +3838,7 @@ def save_sla_risk_concentration_report(
     )
 
 
-# ---------------------------------------------------------------------------
-# Reporting
-# ---------------------------------------------------------------------------
+
 
 def save_category_report(
     result: pd.DataFrame,
@@ -4212,6 +4497,41 @@ def main() -> None:
     )
 
     # -----------------------------------------------------------------------
+    # Monthly operational performance analysis
+    # -----------------------------------------------------------------------
+
+    monthly_operational_result = (
+        build_monthly_operational_performance(
+            df
+        )
+    )
+
+    validate_monthly_operational_performance(
+        result=monthly_operational_result,
+        source_df=df,
+    )
+
+    save_monthly_operational_report(
+        monthly_operational_result
+    )
+
+    print(
+        "\nMonthly operational performance report saved to:"
+    )
+
+    print(
+        MONTHLY_OPERATIONAL_OUTPUT
+    )
+
+    print(
+        "\nMonthly operational performance:"
+    )
+
+    print(
+        monthly_operational_result.to_string(index=False)
+    )
+
+    # -----------------------------------------------------------------------
     # Category analysis
     # -----------------------------------------------------------------------
 
@@ -4519,7 +4839,8 @@ def main() -> None:
     # Final validation status
     # -----------------------------------------------------------------------
 
-    print("\nCategory validation: PASSED")
+    print("\nMonthly operational validation: PASSED")
+    print("Category validation: PASSED")
     print("Priority validation: PASSED")
     print("Reassignment validation: PASSED")
     print("Reassignment resolution validation: PASSED")
