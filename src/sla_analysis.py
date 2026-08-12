@@ -46,6 +46,9 @@ ASSIGNMENT_GROUP_BOTTLENECK_OUTPUT = (
 ASSIGNMENT_GROUP_DRIVER_OUTPUT = (
     REPORT_DIR / "assignment_group_driver_analysis.csv"
 )
+INCIDENT_SLA_RISK_REFERENCE_OUTPUT = (
+    REPORT_DIR / "incident_sla_risk_reference.csv"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +171,259 @@ def load_incident_data() -> pd.DataFrame:
 
     return df
 
+# ---------------------------------------------------------------------------
+# Incident-level SLA risk reference tables
+# ---------------------------------------------------------------------------
+
+def build_incident_sla_risk_reference(
+    category_result: pd.DataFrame,
+    priority_result: pd.DataFrame,
+    reassignment_result: pd.DataFrame,
+    assignment_group_result: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build historical SLA-risk reference tables for incident-level scoring.
+
+    The reference rates are derived from previously validated aggregate
+    analyses. Category and assignment-group references are restricted to
+    populations eligible for primary comparison.
+
+    This function does not calculate an incident-level risk score.
+    It only establishes the historical risk reference data that will
+    later be mapped onto individual incidents.
+
+    The analysis is descriptive and does not imply causality.
+    """
+
+    required_priority_columns = [
+        "priority",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "breach_rate_ci_lower",
+        "breach_rate_ci_upper",
+    ]
+
+    required_reassignment_columns = [
+        "reassignment_bucket",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "breach_rate_ci_lower",
+        "breach_rate_ci_upper",
+    ]
+
+    required_category_columns = [
+        "category",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "breach_rate_ci_lower",
+        "breach_rate_ci_upper",
+        "eligible_for_comparison",
+    ]
+
+    required_assignment_group_columns = [
+        "assignment_group",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "breach_rate_ci_lower",
+        "breach_rate_ci_upper",
+        "eligible_for_comparison",
+    ]
+
+    datasets = {
+        "priority": (
+            priority_result,
+            required_priority_columns,
+        ),
+        "reassignment": (
+            reassignment_result,
+            required_reassignment_columns,
+        ),
+        "category": (
+            category_result,
+            required_category_columns,
+        ),
+        "assignment_group": (
+            assignment_group_result,
+            required_assignment_group_columns,
+        ),
+    }
+
+    for dataset_name, (
+        dataset,
+        required_columns,
+    ) in datasets.items():
+
+        missing_columns = [
+            column
+            for column in required_columns
+            if column not in dataset.columns
+        ]
+
+        if missing_columns:
+            raise ValueError(
+                f"Required {dataset_name} risk-reference columns "
+                "missing: "
+                + ", ".join(missing_columns)
+            )
+
+    category_reference = (
+        category_result[
+            category_result["eligible_for_comparison"]
+        ][
+            [
+                "category",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ]
+        .copy()
+    )
+
+    category_reference["factor_type"] = "Category"
+    category_reference["factor_value"] = (
+        category_reference["category"]
+    )
+
+    assignment_group_reference = (
+        assignment_group_result[
+            assignment_group_result["eligible_for_comparison"]
+        ][
+            [
+                "assignment_group",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ]
+        .copy()
+    )
+
+    assignment_group_reference["factor_type"] = (
+        "Assignment Group"
+    )
+
+    assignment_group_reference["factor_value"] = (
+        assignment_group_reference["assignment_group"]
+    )
+
+    priority_reference = (
+        priority_result[
+            [
+                "priority",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ]
+        .copy()
+    )
+
+    priority_reference["factor_type"] = "Priority"
+    priority_reference["factor_value"] = (
+        priority_reference["priority"]
+    )
+
+    reassignment_reference = (
+        reassignment_result[
+            [
+                "reassignment_bucket",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ]
+        .copy()
+    )
+
+    reassignment_reference["factor_type"] = (
+        "Reassignment Bucket"
+    )
+
+    reassignment_reference["factor_value"] = (
+        reassignment_reference["reassignment_bucket"]
+    )
+
+    reference_tables = [
+        priority_reference[
+            [
+                "factor_type",
+                "factor_value",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ],
+        reassignment_reference[
+            [
+                "factor_type",
+                "factor_value",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ],
+        category_reference[
+            [
+                "factor_type",
+                "factor_value",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ],
+        assignment_group_reference[
+            [
+                "factor_type",
+                "factor_value",
+                "incident_count",
+                "sla_breaches",
+                "breach_rate",
+                "breach_rate_ci_lower",
+                "breach_rate_ci_upper",
+            ]
+        ],
+    ]
+
+    result = (
+        pd.concat(
+            reference_tables,
+            ignore_index=True,
+        )
+        .sort_values(
+            by=[
+                "factor_type",
+                "breach_rate",
+                "incident_count",
+            ],
+            ascending=[
+                True,
+                False,
+                False,
+            ],
+        )
+        .reset_index(drop=True)
+    )
+
+    return result\
 
 # ---------------------------------------------------------------------------
 # Category SLA analysis
@@ -1290,6 +1546,174 @@ def validate_assignment_group_bottlenecks(
         raise AssertionError(
             "Bottleneck thresholds are not consistent across results."
         )
+
+
+# ---------------------------------------------------------------------------
+# Incident-level SLA risk reference validation
+# ---------------------------------------------------------------------------
+
+def validate_incident_sla_risk_reference(
+    result: pd.DataFrame,
+    category_result: pd.DataFrame,
+    priority_result: pd.DataFrame,
+    reassignment_result: pd.DataFrame,
+    assignment_group_result: pd.DataFrame,
+) -> None:
+    """
+    Validate the historical SLA-risk reference tables.
+
+    The validator ensures that the reference population reconciles with
+    the previously validated aggregate analyses and that all historical
+    breach-rate estimates have valid confidence intervals.
+    """
+
+    required_columns = [
+        "factor_type",
+        "factor_value",
+        "incident_count",
+        "sla_breaches",
+        "breach_rate",
+        "breach_rate_ci_lower",
+        "breach_rate_ci_upper",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in result.columns
+    ]
+
+    if missing_columns:
+        raise AssertionError(
+            "Required incident SLA risk reference columns missing: "
+            + ", ".join(missing_columns)
+        )
+
+    if result[required_columns].isna().any().any():
+        raise AssertionError(
+            "Missing values detected in incident SLA risk references."
+        )
+
+    expected_factor_types = {
+        "Priority",
+        "Reassignment Bucket",
+        "Category",
+        "Assignment Group",
+    }
+
+    actual_factor_types = set(
+        result["factor_type"].unique()
+    )
+
+    if actual_factor_types != expected_factor_types:
+        raise AssertionError(
+            "Unexpected incident SLA risk factor types: "
+            f"{actual_factor_types}"
+        )
+
+    expected_counts = {
+        "Priority": len(priority_result),
+        "Reassignment Bucket": len(reassignment_result),
+        "Category": int(
+            category_result[
+                category_result["eligible_for_comparison"]
+            ].shape[0]
+        ),
+        "Assignment Group": int(
+            assignment_group_result[
+                assignment_group_result["eligible_for_comparison"]
+            ].shape[0]
+        ),
+    }
+
+    actual_counts = (
+        result["factor_type"]
+        .value_counts()
+        .to_dict()
+    )
+
+    if actual_counts != expected_counts:
+        raise AssertionError(
+            "Incident SLA risk reference counts do not reconcile: "
+            f"expected={expected_counts}, "
+            f"actual={actual_counts}"
+        )
+
+    if result.duplicated(
+        subset=[
+            "factor_type",
+            "factor_value",
+        ]
+    ).any():
+        raise AssertionError(
+            "Duplicate incident SLA risk reference factors detected."
+        )
+
+    if (
+        result["incident_count"] <= 0
+    ).any():
+        raise AssertionError(
+            "Invalid non-positive incident counts detected."
+        )
+
+    if (
+        result["sla_breaches"] < 0
+    ).any():
+        raise AssertionError(
+            "Negative SLA breach counts detected."
+        )
+
+    if (
+        result["sla_breaches"]
+        > result["incident_count"]
+    ).any():
+        raise AssertionError(
+            "SLA breach counts exceed incident counts."
+        )
+
+    expected_breach_rate = (
+        result["sla_breaches"]
+        / result["incident_count"]
+        * 100
+    )
+
+    if not np.isclose(
+        result["breach_rate"],
+        expected_breach_rate,
+    ).all():
+        raise AssertionError(
+            "Incident SLA risk breach-rate calculations "
+            "are inconsistent."
+        )
+
+    invalid_intervals = result[
+        (
+            result["breach_rate"]
+            < result["breach_rate_ci_lower"]
+        )
+        |
+        (
+            result["breach_rate"]
+            > result["breach_rate_ci_upper"]
+        )
+    ]
+
+    if not invalid_intervals.empty:
+        raise AssertionError(
+            "Some incident SLA risk breach rates fall "
+            "outside their confidence intervals."
+        )
+
+    if (
+        result["breach_rate_ci_lower"] < 0
+    ).any() or (
+        result["breach_rate_ci_upper"] > 100
+    ).any():
+        raise AssertionError(
+            "Invalid incident SLA risk Wilson confidence intervals."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Category validation
 # ---------------------------------------------------------------------------
@@ -1910,6 +2334,22 @@ def validate_assignment_group_analysis(
             "Invalid assignment-group resolution coverage."
         )
 
+def save_incident_sla_risk_reference_report(
+    result: pd.DataFrame,
+) -> None:
+    """
+    Save historical incident SLA-risk reference tables to CSV.
+    """
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_csv(
+        INCIDENT_SLA_RISK_REFERENCE_OUTPUT,
+        index=False,
+    )
 
 # ---------------------------------------------------------------------------
 # Reporting
@@ -2730,6 +3170,32 @@ def main() -> None:
         assignment_group_driver_result
     )
 
+        # -----------------------------------------------------------------------
+    # Incident-level SLA risk reference analysis
+    # -----------------------------------------------------------------------
+
+    incident_sla_risk_reference_result = (
+        build_incident_sla_risk_reference(
+            category_result=category_result,
+            priority_result=priority_result,
+            reassignment_result=reassignment_result,
+            assignment_group_result=assignment_group_result,
+        )
+    )
+
+    validate_incident_sla_risk_reference(
+        result=incident_sla_risk_reference_result,
+        category_result=category_result,
+        priority_result=priority_result,
+        reassignment_result=reassignment_result,
+        assignment_group_result=assignment_group_result,
+    )
+
+    save_incident_sla_risk_reference_report(
+        incident_sla_risk_reference_result
+    )
+
+
     # -----------------------------------------------------------------------
     # Final validation status
     # -----------------------------------------------------------------------
@@ -2741,7 +3207,7 @@ def main() -> None:
     print("Assignment-group validation: PASSED")
     print("Assignment-group bottleneck validation: PASSED")
     print("Assignment-group driver validation: PASSED")
-
+    print("Incident SLA risk reference validation: PASSED")
 
 if __name__ == "__main__":
     main()
