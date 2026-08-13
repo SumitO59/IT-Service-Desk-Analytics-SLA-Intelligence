@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import psycopg
 
@@ -28,11 +29,12 @@ SCHEMA_FILE = (
 # PostgreSQL configuration
 # ---------------------------------------------------------------------------
 
-DB_HOST = "localhost"
-DB_PORT = 5432
-DB_NAME = "service_desk_analytics"
-DB_USER = "service_desk_app"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is not configured."
+    )
 
 # ---------------------------------------------------------------------------
 # Expected analytical schema
@@ -92,19 +94,13 @@ EXPECTED_COLUMNS = [
 
 def get_connection() -> psycopg.Connection:
     """
-    Create a connection to the project PostgreSQL database.
+    Create a connection to the configured PostgreSQL database.
 
-    Password authentication is delegated to PostgreSQL's .pgpass
-    configuration rather than storing credentials in project source code.
+    Database credentials are supplied through the DATABASE_URL
+    environment variable rather than being stored in source code.
     """
 
-    return psycopg.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        dbname=DB_NAME,
-        user=DB_USER,
-    )
-
+    return psycopg.connect(DATABASE_URL)
 
 # ---------------------------------------------------------------------------
 # Input validation

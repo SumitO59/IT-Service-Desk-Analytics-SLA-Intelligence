@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -18,22 +19,25 @@ st.set_page_config(
 # DATABASE CONFIGURATION
 # ============================================================================
 
-DB_HOST = "localhost"
-DB_PORT = 5432
-DB_NAME = "service_desk_analytics"
-DB_USER = "service_desk_app"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is not configured."
+    )
 
 
 @st.cache_resource
 def get_engine():
     """Create and cache the PostgreSQL SQLAlchemy engine."""
 
-    connection_url = (
-        f"postgresql+psycopg://"
-        f"{DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    return create_engine(
+    DATABASE_URL.replace(
+        "postgresql://",
+        "postgresql+psycopg://",
+        1,
     )
-
-    return create_engine(connection_url)
+)
 
 
 @st.cache_data

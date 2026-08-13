@@ -272,15 +272,16 @@ conda activate service-desk
 pip install -r requirements.txt
 ```
 
-### 4. Configure PostgreSQL
 
-The application expects:
+### 4. Configure the database
 
-```text
-Host: localhost
-Port: 5432
-Database: service_desk_analytics
-User: service_desk_app
+The application connects to PostgreSQL through the `DATABASE_URL`
+environment variable.
+
+For local development, configure the Supabase PostgreSQL connection:
+
+```bash
+export DATABASE_URL="postgresql://<username>:<password>@<host>:<port>/<database>"
 ```
 
 ### 5. Run the dashboard
@@ -299,16 +300,20 @@ Compile the Streamlit application:
 python -m py_compile app.py
 ```
 
-Validate SQL:
+Validate PostgreSQL connectivity:
 
 ```bash
-PAGER=cat psql \
-  -h localhost \
-  -p 5432 \
-  -U service_desk_app \
-  -d service_desk_analytics \
-  -f sql/analysis_queries.sql
-```
+python - <<'PY'
+import os
+import psycopg
+
+with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM incidents")
+        print("Incident rows:", cur.fetchone()[0])
+
+print("PostgreSQL connection: SUCCESS")
+PY
 
 Check Git formatting:
 
