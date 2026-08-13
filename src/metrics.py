@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.database import get_connection
+from .database import get_connection
 
 
 # -------------------------------------------------------------------
