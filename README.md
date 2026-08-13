@@ -228,6 +228,26 @@ IT-Service-Desk-Analytics/
     └── monthly_operational_performance.csv
 
 
+---
+
+## Data Pipeline
+
+The project transforms the raw event-level incident log into an incident-level analytical dataset before loading it into PostgreSQL.
+
+```text
+Raw incident event log
+        ↓
+Python data cleaning and transformation
+        ↓
+Incident-level analytical dataset
+        ↓
+PostgreSQL analytical database
+        ↓
+SQL analytical queries
+        ↓
+CSV analytical reports
+        ↓
+Streamlit dashboard
 
 ---
 
