@@ -2,19 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-
-# -------------------------------------------------------------------
-# Project paths
-# -------------------------------------------------------------------
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-PROCESSED_FILE = (
-    PROJECT_ROOT
-    / "data"
-    / "processed"
-    / "incidents_clean.csv"
-)
+from src.database import get_connection
 
 
 # -------------------------------------------------------------------
@@ -23,7 +11,7 @@ PROCESSED_FILE = (
 
 def load_incidents() -> pd.DataFrame:
     """
-    Load the cleaned incident-level dataset.
+    Load the cleaned incident-level dataset from PostgreSQL.
 
     Returns
     -------
@@ -31,10 +19,18 @@ def load_incidents() -> pd.DataFrame:
         One row per incident.
     """
 
-    df = pd.read_csv(
-        PROCESSED_FILE,
-        low_memory=False,
-    )
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT *
+                FROM incidents
+                ORDER BY number
+            """)
+
+            rows = cur.fetchall()
+            columns = [description.name for description in cur.description]
+
+    df = pd.DataFrame(rows, columns=columns)
 
     timestamp_columns = [
         "opened_at",
