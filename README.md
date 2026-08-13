@@ -20,7 +20,7 @@ The workflow combines **Python analytics, PostgreSQL, SQL, SLA risk scoring, ana
 
 ## Live Demo
 
-[**View Live Dashboard →**](YOUR_URL)
+[**View Live Dashboard →**]([YOUR_URL](https://it-service-desk-analytics-sla-intelligence-hraympah6oc2zxuyz6q.streamlit.app/))
 
 ## Key Capabilities
 
