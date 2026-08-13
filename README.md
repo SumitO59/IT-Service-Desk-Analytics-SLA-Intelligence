@@ -191,7 +191,6 @@ streamlit run app.py
 | Database Access | SQLAlchemy |
 | Analytics | SQL |
 | Dashboard | Streamlit |
-| Exploration | Jupyter Notebook |
 | Version Control | Git / GitHub |
 
 ---
@@ -215,40 +214,20 @@ IT-Service-Desk-Analytics/
 │   └── analysis_queries.sql
 │
 ├── reports/
-│   ├── incident_sla_risk_scores.csv
-│   ├── incident_sla_risk_reference.csv
-│   ├── sla_risk_portfolio_summary.csv
-│   ├── sla_risk_concentration_analysis.csv
-│   ├── assignment_group_performance.csv
-│   ├── assignment_group_bottleneck_analysis.csv
-│   ├── assignment_group_driver_analysis.csv
-│   ├── category_sla_performance.csv
-│   ├── priority_sla_performance.csv
-│   ├── reassignment_sla_performance.csv
-│   ├── reassignment_resolution_performance.csv
-│   └── monthly_operational_performance.csv
-│
-└── notebooks/
-    └── service_desk_analysis.ipynb
-```
+    ├── incident_sla_risk_scores.csv
+    ├── incident_sla_risk_reference.csv
+    ├── sla_risk_portfolio_summary.csv
+    ├── sla_risk_concentration_analysis.csv
+    ├── assignment_group_performance.csv
+    ├── assignment_group_bottleneck_analysis.csv
+    ├── assignment_group_driver_analysis.csv
+    ├── category_sla_performance.csv
+    ├── priority_sla_performance.csv
+    ├── reassignment_sla_performance.csv
+    ├── reassignment_resolution_performance.csv
+    └── monthly_operational_performance.csv
 
----
 
-## Jupyter Notebook
-
-The Jupyter notebook was used during the **exploratory analysis and validation phase**.
-
-It was used for:
-
-- Dataset inspection
-- Data-quality investigation
-- Exploratory analysis
-- Distribution analysis
-- Relationship exploration
-- Prototyping analytical logic
-- Validating metrics before production implementation
-
-Validated logic was subsequently moved into reusable Python modules, SQL queries, reports, and the Streamlit application.
 
 ---
 
