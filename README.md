@@ -18,6 +18,32 @@ This project transforms **24,918 IT service desk incidents** into an analytical 
 
 The workflow combines **Python analytics, PostgreSQL, SQL, SLA risk scoring, analytical reporting, and an interactive Streamlit dashboard**.
 
+## Live Demo
+
+[**View Live Dashboard →**](YOUR_URL)
+
+## Key Capabilities
+
+- SLA compliance and breach analysis
+- SLA risk scoring
+- Assignment-group performance analysis
+- Reassignment analysis
+- Resolution-time analysis
+- Monthly operational performance
+- Executive KPI dashboard
+
+## Architecture
+
+GitHub
+   ↓
+Streamlit Community Cloud
+   ↓
+Supabase PostgreSQL
+   ↓
+24,918 IT service incidents
+   ↓
+Analytical dashboard
+
 ```text
 Incident Data
      │
