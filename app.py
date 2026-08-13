@@ -125,8 +125,10 @@ except Exception as exc:
 
 
 # ============================================================================
-# EXECUTIVE KPI CARDS
+# EXECUTIVE OVERVIEW
 # ============================================================================
+
+st.subheader("Executive Overview")
 
 kpi = kpi_data.iloc[0]
 
@@ -194,14 +196,9 @@ with col4:
 # DATA VALIDATION
 # ============================================================================
 
-st.divider()
-
-st.subheader("Database Status")
-
-st.success(
-    f"Connected to PostgreSQL successfully. "
-    f"Analytical dataset contains "
-    f"{int(kpi['total_incidents']):,} incidents."
+st.caption(
+    f"PostgreSQL connection active • "
+    f"{int(kpi['total_incidents']):,} incidents available for analysis."
 )
 
 # ============================================================================
@@ -308,6 +305,17 @@ st.dataframe(
     priority_sla,
     width="stretch",
     hide_index=True,
+)
+
+highest_breach_priority = priority_sla.loc[
+    priority_sla["sla_breach_rate_pct"].idxmax()
+]
+
+st.info(
+    f"Highest SLA breach exposure: "
+    f"{highest_breach_priority['priority_level']} priority incidents "
+    f"with a {highest_breach_priority['sla_breach_rate_pct']:.2f}% "
+    f"breach rate."
 )
 
 # ============================================================================
@@ -419,6 +427,19 @@ st.dataframe(
     width="stretch",
     hide_index=True,
 )
+
+highest_reassignment_risk = reassignment_sla.loc[
+    reassignment_sla["sla_breach_rate_pct"].idxmax()
+]
+
+st.warning(
+    f"Highest reassignment risk: incidents in the "
+    f"{highest_reassignment_risk['reassignment_level']} reassignment bucket "
+    f"have a {highest_reassignment_risk['sla_breach_rate_pct']:.2f}% "
+    f"SLA breach rate."
+)
+
+
 # ============================================================================
 # RESOLUTION-TIME PERFORMANCE
 # ============================================================================
