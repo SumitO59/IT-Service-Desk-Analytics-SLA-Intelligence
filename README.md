@@ -20,8 +20,9 @@ The workflow combines **Python analytics, PostgreSQL, SQL, SLA risk scoring, ana
 
 ## Live Demo
 
-[**View Live Dashboard →**]([YOUR_URL](https://it-service-desk-analytics-sla-intelligence-hraympah6oc2zxuyz6q.streamlit.app/))
+[**View Live Dashboard →**](https://it-service-desk-analytics-sla-intelligence-hraympah6oc2zxuyz6q.streamlit.app/)
 
+> Deployed on Streamlit Community Cloud and connected to a Supabase PostgreSQL analytical database containing 24,918 IT service desk incidents.
 ## Key Capabilities
 
 - SLA compliance and breach analysis
